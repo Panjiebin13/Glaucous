@@ -7,7 +7,7 @@
 ### Day 1（8/27）
 
 - [x] 0.1 WSL2 环境检查（Python 3.11.15 经 Miniconda 环境就绪）
-- [ ] 0.2 GitHub 新建仓库（本轮跳过：仓库尚未建立，待补）
+- [x] 0.2 GitHub 新建仓库（github.com/Panjiebin13/Glaucous，已推送）
 - [x] 0.3 项目骨架：pyproject.toml、src/glaucous/ 包结构、pytest 配置
 - [x] 0.4 LLM 客户端：OpenAI 兼容请求 + 重试退避 + 流式读取
 - [x] 0.5 工具基座：Tool 协议、registry、JSON Schema 定义

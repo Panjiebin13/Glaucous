@@ -31,7 +31,7 @@
 | # | 任务 | 产出 | 预计 | 状态 |
 |---|---|---|---|---|
 | 0.1 | WSL2 环境检查：`python3.11 --version`、`git --version` | 环境就绪确认 | 0.5h | ✅（Python 3.11.15 经 Miniconda 就绪） |
-| 0.2 | GitHub 新建公开仓库 `glaucous`，clone 到 WSL `~/dev/glaucous` | 仓库 + 首次 commit | 0.5h | ⏸ 本轮跳过（仓库尚未建立） |
+| 0.2 | GitHub 新建公开仓库 `glaucous`，clone 到 WSL `~/dev/glaucous` | 仓库 + 首次 commit | 0.5h | ✅（仓库已建并推送） |
 | 0.3 | 项目骨架：pyproject.toml、src/glaucous/ 包结构、pytest 配置 | `pip install -e .` 可装 | 1h | ✅ |
 | 0.4 | LLM 客户端：OpenAI 兼容请求 + 重试退避 + 流式读取 | `client.py`，跑通一次真实对话 | 2h | ✅ |
 | 0.5 | 工具基座：Tool 协议、registry、JSON Schema 定义 | `base.py` | 1h | ✅ |
