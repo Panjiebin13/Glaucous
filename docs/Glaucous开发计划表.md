@@ -26,20 +26,20 @@
 
 **原则：这一步不做任何"锦上添花"，所有与闭环无关的一律延后。**
 
-### Day 1（8/27，今天）
+### Day 1（8/27）✅ 已完成
 
-| # | 任务 | 产出 | 预计 |
-|---|---|---|---|
-| 0.1 | WSL2 环境检查：`python3.11 --version`、`git --version` | 环境就绪确认 | 0.5h |
-| 0.2 | GitHub 新建公开仓库 `glaucous`，clone 到 WSL `~/dev/glaucous` | 仓库 + 首次 commit | 0.5h |
-| 0.3 | 项目骨架：pyproject.toml、src/glaucous/ 包结构、pytest 配置 | `pip install -e .` 可装 | 1h |
-| 0.4 | LLM 客户端：OpenAI 兼容请求 + 重试退避 + 流式读取 | `client.py`，跑通一次真实对话 | 2h |
-| 0.5 | 工具基座：Tool 协议、registry、JSON Schema 定义 | `base.py` | 1h |
-| 0.6 | 三个只读工具：read_file / list_dir / grep（暂无沙箱） | Plan 模式探索能力 | 1.5h |
-| 0.7 | 主循环 v0：请求 → tool_calls → 执行 → 回喂 → 终止 | **端到端第一次转起来** | 2h |
-| 0.8 | 简版 CLI：input 循环 + print 输出（无主题） | `glaucous` 命令可跑 | 1h |
+| # | 任务 | 产出 | 预计 | 状态 |
+|---|---|---|---|---|
+| 0.1 | WSL2 环境检查：`python3.11 --version`、`git --version` | 环境就绪确认 | 0.5h | ✅（Python 3.11.15 经 Miniconda 就绪） |
+| 0.2 | GitHub 新建公开仓库 `glaucous`，clone 到 WSL `~/dev/glaucous` | 仓库 + 首次 commit | 0.5h | ⏸ 本轮跳过（仓库尚未建立） |
+| 0.3 | 项目骨架：pyproject.toml、src/glaucous/ 包结构、pytest 配置 | `pip install -e .` 可装 | 1h | ✅ |
+| 0.4 | LLM 客户端：OpenAI 兼容请求 + 重试退避 + 流式读取 | `client.py`，跑通一次真实对话 | 2h | ✅ |
+| 0.5 | 工具基座：Tool 协议、registry、JSON Schema 定义 | `base.py` | 1h | ✅ |
+| 0.6 | 三个只读工具：read_file / list_dir / grep（暂无沙箱） | Plan 模式探索能力 | 1.5h | ✅ |
+| 0.7 | 主循环 v0：请求 → tool_calls → 执行 → 回喂 → 终止 | **端到端第一次转起来** | 2h | ✅ |
+| 0.8 | 简版 CLI：input 循环 + print 输出（无主题） | `glaucous` 命令可跑 | 1h | ✅ |
 
-**Day 1 验收**：在终端里对 agent 说"看看这个项目的结构"，它调用工具并正确回答。
+**Day 1 验收**：在终端里对 agent 说"看看这个项目的结构"，它调用工具并正确回答。 ✅ **已通过**（2026-08-27，真实 LLM 端到端：9× list_dir + 3× read_file，结构回答准确；另覆盖 grep、错误路径、多轮上下文、优雅退出）
 
 ### Day 2（8/28）
 
