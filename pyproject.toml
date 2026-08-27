@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "glaucous"
+version = "0.1.0"
+description = "Glaucous —— 雨过天青，海鸥滑翔，代码自有清凉。一个清爽可控的 CLI 编程智能体。"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Glaucous" }]
+dependencies = [
+    # 只把 openai SDK 当 HTTP 通道使用（需求文档约束 3）；
+    # 重试/退避/流式 tool-call 拼装/解析容错均自研（概设 §3）
+    "openai>=1.40,<2",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+]
+
+[project.scripts]
+glaucous = "glaucous.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
