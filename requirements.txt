@@ -1,0 +1,12 @@
+# Glaucous 依赖清单（与 pyproject.toml 保持同步）
+# 注意：这是 Python 3.11+ 项目，建议配合 venv 使用
+# pip install -r requirements.txt
+
+# 运行时依赖（核心唯一依赖）
+# 只把 openai SDK 当 HTTP 通道使用（需求文档约束 3）；
+# 重试/退避/流式 tool-call 拼装/解析容错均自研
+openai>=1.40,<2
+
+# 开发/测试依赖（如需跑测试：pip install -r requirements.txt 后已一并安装）
+pytest>=8.0
+pytest-asyncio>=0.23
