@@ -26,11 +26,15 @@ state.mode 与快照，不一致即 emit——覆盖 submit_plan 切换与自然
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, Callable
 
+from ..context import budget, compactor
+from ..context.compactor import L1_KEEP_RECENT_ROUNDS, MAX_L2_FAILURES
 from ..context.history import History, ToolMessage
 from ..llm.client import LLMClient
-from ..tools.base import MODE_BUILD, ParseCircuitBroken, ToolRegistry
+from ..safety.output_limit import truncate_output
+from ..tools.base import MODE_BUILD, ParseCircuitBroken, ToolRegistry, ToolResult
 from .state import SessionState
 
 # loop → CLI 的事件契约（Day2 Plan §4.5）：Day 1 纯文本渲染，M3 升级 rich 主题
@@ -50,6 +54,9 @@ class AgentLoop:
         state: SessionState,
         max_steps: int = 50,
         on_event: LoopEvent | None = None,
+        context_limit: int = 128_000,
+        outputs_dir: Path | None = None,
+        plans_dir: Path | None = None,
     ):
         self._llm = llm
         self._registry = registry
@@ -57,6 +64,11 @@ class AgentLoop:
         self._state = state
         self._max_steps = max_steps
         self._on_event = on_event
+        # M2 上下文管理依赖（Day4 Plan §4.9）：预算上限 / L0 落盘目录 / 方案锚目录
+        self._context_limit = context_limit
+        self._outputs_dir = outputs_dir
+        self._plans_dir = plans_dir
+        self._l2_failures = 0  # L2 连续失败计数（达上限且仍 critical → 终止③，防压缩循环）
 
     async def run(self, task: str) -> str:
         """执行一轮用户任务，返回最终文本（自然终答 / 终止诊断）。"""
@@ -72,6 +84,11 @@ class AgentLoop:
                 )
             steps += 1
 
+            # 守卫（M2 上下文管线）：预算评估 → L1 裁剪 → L2 压缩 → 预算耗尽终止③
+            budget_abort = await self._enforce_budget()
+            if budget_abort is not None:
+                return self._terminate(budget_abort)
+
             # mode 快照：本轮声明层与执行层保持一致（Day2 Plan §4.5）
             mode_snapshot = self._state.mode
 
@@ -84,6 +101,7 @@ class AgentLoop:
             if not msg.tool_calls:
                 # ① 自然终止：终答入史（REPL 多轮语义：下一轮能看到本轮结论）
                 self._history.push_assistant(msg)
+                self._emit_budget()
                 # Build 自然终止 = 任务完成 → 回归 Plan（概设 §5.1）。
                 # 异常终止路径（②③）不在此分支，不触发回归——异常 ≠ 完成
                 if mode_snapshot == MODE_BUILD:
@@ -108,6 +126,7 @@ class AgentLoop:
                     self._emit("tool_start", {"call": call})
                     result = await self._registry.dispatch(call, mode_snapshot)
                     dispatched.add(call.id)
+                    result = self._truncate_if_needed(call.id, result)
                     self._history.push_tool(call, result)
                     self._emit("tool_end", {"call": call, "result": result})
             except ParseCircuitBroken as exc:
@@ -135,6 +154,75 @@ class AgentLoop:
                     },
                 )
 
+    def _truncate_if_needed(self, call_id: str, result: ToolResult) -> ToolResult:
+        """L0 输出截断（任务 2.5）：入史前替换超长正文，完整输出落盘可回取。
+
+        metadata 不动——lines 等 记账字段保持原始值（UI 摘要/后续 L1 摘要用原始行数）；
+        未配置 outputs_dir（测试/内嵌场景）时跳过截断。
+        """
+        if self._outputs_dir is None:
+            return result
+        content, _truncated = truncate_output(result.content, call_id, self._outputs_dir)
+        if content != result.content:
+            result.content = content
+        return result
+
+    async def _enforce_budget(self) -> str | None:
+        """守卫点内的上下文预算管线（任务 2.4~2.7，概设 §4.2）。
+
+        low：直接放行；>70%：L1 裁剪（本地派生摘要，幂等）；>85%：追加 L2 模型
+        压缩（失败降级 L1 加深，连续失败达 MAX_L2_FAILURES 且仍 critical →
+        终止③防压缩调用循环）；压缩后仍 ≥100% → 预算耗尽优雅终止（终止条件③）。
+        返回 None 表示继续本轮请求，返回字符串为终止诊断。
+        """
+        report = budget.build_report(self._history.view(), self._context_limit)
+        if report.level == "low":
+            self._l2_failures = 0  # 占用回落，非连续失败（S-01：降回阈值即清零）
+            return None
+        compactor.trim_history(self._history.messages)
+        report = budget.build_report(self._history.view(), self._context_limit)
+        if report.level != "critical":
+            self._l2_failures = 0  # L1 已把占用压回阈值内：非连续失败，清零
+            return None
+        compressed = await compactor.compact_history(
+            self._history.messages, self._llm, plans_dir=self._plans_dir
+        )
+        if compressed:
+            self._l2_failures = 0
+        else:
+            self._l2_failures += 1
+            compactor.trim_history(
+                self._history.messages,
+                keep_recent=max(1, L1_KEEP_RECENT_ROUNDS - self._l2_failures),
+            )
+        report = budget.build_report(self._history.view(), self._context_limit)
+        exhausted = report.percent >= 1.0
+        # L2 反复失败且占用仍超阈值：继续重试只会每轮空转压缩调用（S-01/D12）
+        l2_loop = (
+            not compressed
+            and self._l2_failures >= MAX_L2_FAILURES
+            and report.level == "critical"
+        )
+        if exhausted or l2_loop:
+            return (
+                "上下文已达上限，压缩后仍超限。已完成部分保留在会话文件中，"
+                "可 /exit 后 --resume 继续。"
+            )
+        return None
+
+    def _emit_budget(self) -> None:
+        """每轮结束的占用条事件（任务 2.4，FR-25）：数据与压缩管线同一来源（概设 §4.2）。"""
+        report = budget.build_report(self._history.view(), self._context_limit)
+        self._emit(
+            "budget",
+            {
+                "used": report.used,
+                "limit": report.limit,
+                "percent": round(report.percent, 4),
+                "level": report.level,
+            },
+        )
+
     def _terminate(self, diagnostic: str) -> str:
         """终止路径的统一交付：诊断文本经事件通道显式通知（不依赖返回值推断）。
 
@@ -143,6 +231,7 @@ class AgentLoop:
         已流式交付」与「诊断未交付」；diagnostic 事件保证必达。
         """
         self._emit("diagnostic", {"text": diagnostic})
+        self._emit_budget()
         return diagnostic
 
     def _salvage_dangling_calls(self, msg: Any, dispatched: set[str], reason: str) -> None:

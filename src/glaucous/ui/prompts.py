@@ -1,12 +1,14 @@
-"""system prompt 组装（Day 2：双模式行为引导）。
+"""system prompt 组装（Day 4：双模式行为引导 + 规则/记忆注入段）。
 
 注入策略（Day2 Plan §5 决策：静态注入）：system prompt 同时描述 Plan/Build
 两种模式的行为规则——不随 mode 动态重写。理由：动态重写破坏消息不可变性
 （system 在 JSONL 不落盘但内存 view() 每次引用），且行为约束由声明层
 （tool_schemas 过滤）+ 执行层（dispatch 校验）硬保证，提示词只做引导。
 
-glaucous.md 规则注入、事实记忆、skill 索引是 M2/M3 任务，届时在
-build_system_prompt 的段落序列上扩展（概设 §4.2）。
+注入段顺序（Day4 Plan §4.9，概设 §4.2）：基础准则 → 工作区 → glaucous.md 规则
+（全量永不裁剪，FR-20）→ 事实记忆（Top-N，FR-21），空段省略。规则与记忆文本由
+extensions/rules.py 与 extensions/memory.py 现读现传（每次启动现读，FR-20
+「每次会话自动生效」），本模块只负责拼装，不感知文件系统。
 """
 
 from __future__ import annotations
@@ -34,13 +36,26 @@ edit_file 精确修改（先 read 后 edit，old 文本保持唯一匹配）。�
 破坏性命令（删除/强制推送/区外写入）即使全放行也会被单独拦截。全部步骤完成后\
 汇报结果（做了什么、修改了哪些文件、验证情况）。
 - 任务完成后会自动回到 Plan 模式，等待下一个需求。
+
+求助节奏（环境难题）：
+- 环境类失败（依赖缺失/命令不存在/凭证不可得）先自行重试 **2 次**，仍无果再调用
+  ask_user 向用户求助——不得动辄提问，也不得死磕（FR-18）。
+- 提问必须具体可答：说明缺什么、已尝试什么，并附候选选项（如解释器路径候选）。
+- 用户的回答若包含环境事实（解释器路径、构建命令等），应调用 memory_save 沉淀到
+  对应作用域（项目事实存 project，跨项目通用存 global），下次不再重复询问（FR-19）。
 """
 
 
-def build_system_prompt(workspace: Path) -> str:
-    """组装 system prompt：基础准则 + 双模式引导 + 工作区信息。
+def build_system_prompt(workspace: Path, rules: str = "", memory: str = "") -> str:
+    """组装 system prompt：基础准则 + 双模式引导 + 工作区信息 + 规则/记忆注入段。
 
-    后续里程碑的注入顺序（概设 §4.2）：基础准则 → glaucous.md 规则 →
-    事实记忆 → skill 索引，均在 system 消息内追加段落。
+    :param rules: glaucous.md 双层规则全文（load_rules 产物，全量不裁剪，FR-20）
+    :param memory: 事实记忆注入文本（MemoryStore.load_injection 产物，FR-21）
+    空段省略；默认参数保持旧签名（workspace 单参）调用兼容。
     """
-    return f"{BASE_PROMPT}\n当前工作区：{workspace.resolve()}\n"
+    sections = [BASE_PROMPT, f"当前工作区：{workspace.resolve()}"]
+    if rules:
+        sections.append(f"项目与全局规则（glaucous.md，必须遵守）：\n{rules}")
+    if memory:
+        sections.append(f"已知事实记忆（环境事实，跨会话沉淀）：\n{memory}")
+    return "\n\n".join(sections) + "\n"

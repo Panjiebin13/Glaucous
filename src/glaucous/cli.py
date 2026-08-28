@@ -20,17 +20,23 @@ from .agent.loop import AgentLoop
 from .agent.state import POLICY_AUTO_APPROVE, POLICY_PER_ACTION, SessionState
 from .config import ConfigError, load_config
 from .context.history import History
+from .extensions.memory import MemoryStore
+from .extensions.rules import load_rules
 from .llm.client import LLMClient
 from .permission.approval import ApprovalAction, ApprovalDecision, ApprovalPipeline, AuditLog
 from .permission.risk import Risk
 from .permission.workspace import Workspace
 from .tools.base import ToolRegistry
 from .tools.files import EditFileTool, ListDirTool, ReadFileTool, WriteFileTool
+from .tools.interactive import AskUserTool
+from .tools.memory_tool import MemorySaveTool
+from .tools.output import ReadOutputTool
 from .tools.planning import (
     CHOICE_BUILD_AUTO_APPROVE,
     CHOICE_BUILD_PER_ACTION,
     CHOICE_KEEP_PLANNING,
     PlanDecision,
+    ReadPlanTool,
     SubmitPlanTool,
 )
 from .tools.search import GrepTool
@@ -76,11 +82,15 @@ def build_registry(
     workspace: Workspace,
     state: SessionState,
     pipeline: ApprovalPipeline,
+    memory_store: MemoryStore | None = None,
+    outputs_dir: Path | None = None,
+    plans_dir: Path | None = None,
 ) -> ToolRegistry:
-    """装配 M1 全量工具：三个只读 + bash + 双写 + submit_plan。
+    """装配全量工具：只读四件 + 双写 + submit_plan + M2 交互/记忆/回取工具。
 
-    权限管线注入 registry（dispatch 层统一审批）；submit_plan 的 confirm 回调
-    由 CLI 注入；工具层不感知终端（分层约定：tools 层无 UI 依赖）。
+    权限管线注入 registry（dispatch 层统一审批）；submit_plan/ask_user 的
+    交互回调由 CLI 注入；read_output/read_plan 的目录由 CLI 派生传入
+    （系统派生路径无沙箱面，Day4 Plan 决策 D8）；工具层不感知终端。
     """
     registry = ToolRegistry()
     reader = ReadFileTool(workspace)
@@ -91,6 +101,16 @@ def build_registry(
     registry.register(WriteFileTool(workspace, reader=reader))
     registry.register(EditFileTool(workspace, reader=reader))
     registry.set_approval_pipeline(pipeline)
+
+    # M2 任务 2.2/2.3：记忆写入与用户求助（回调由 make_ask_callback 注入）
+    if memory_store is not None:
+        registry.register(MemorySaveTool(memory_store))
+        registry.register(AskUserTool(ask=make_ask_callback()))
+    # M2 任务 2.5/2.7：L0 落盘回取 + 方案回读（目录由系统派生，D8）
+    if outputs_dir is not None:
+        registry.register(ReadOutputTool(outputs_dir))
+    if plans_dir is not None:
+        registry.register(ReadPlanTool(plans_dir))
 
     def confirm(plan: str) -> PlanDecision:
         """三选一交互：打印方案全文，读入 ①②③ 决策。
@@ -108,8 +128,32 @@ def build_registry(
             state.enter_build(POLICY_AUTO_APPROVE)
         return decision
 
-    registry.register(SubmitPlanTool(confirm=confirm))
+    registry.register(SubmitPlanTool(confirm=confirm, plans_dir=plans_dir))
     return registry
+
+
+def make_ask_callback():
+    """ask_user 终端实现（任务 2.3）：提问卡 + 候选列表 + 序号/自由文本回答。
+
+    EOF/Ctrl+C 返回 None → 工具回喂「用户未响应」控制信号（非交互环境不挂死）。
+    """
+
+    def ask(question: str, options: list[str]) -> str | None:
+        print("\n╭─ 🕊 请教 ─────────────────────────────────")
+        print(f"│  {question}")
+        for i, option in enumerate(options, 1):
+            print(f"│  [{i}] {option}")
+        print("╰──────────────────────────────────────────")
+        try:
+            raw = sanitize_input(input("  回答（输入候选序号或自由文本）: ")).strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return None
+        if raw.isdigit() and 1 <= int(raw) <= len(options):
+            return options[int(raw) - 1]
+        return raw
+
+    return ask
 
 
 def make_decision_callback():
@@ -191,6 +235,14 @@ def render_event(event: str, payload: dict[str, Any], state: SessionState) -> No
             "·每次审批" if payload["policy"] == POLICY_PER_ACTION else "·自动放行"
         )
         print(f"  ◆ {payload['reason']}（{payload['mode']}{policy_note}）")
+    elif event == "budget":
+        # 上下文占用条（任务 2.4，FR-25）：12 格进度条 + 百分比，warn/critical 附提示
+        used, limit = int(payload["used"]), int(payload["limit"])
+        ratio = min(1.0, used / limit) if limit else 0.0
+        filled = round(ratio * 12)
+        bar = "█" * filled + "░" * (12 - filled)
+        note = {"warn": "（建议压缩对话）", "critical": "（上下文即将压缩）"}.get(payload["level"], "")
+        print(f"  ctx {ratio:6.1%} [{bar}] {used // 1000}k/{limit // 1000}k tokens {note}")
     elif event == "tool_start":
         call = payload["call"]
         brief = call.arguments if len(call.arguments) <= 80 else call.arguments[:80] + "…"
@@ -274,7 +326,16 @@ async def repl(workspace: Path, resume_id: str | None) -> None:
 
     print(BANNER)
     llm = LLMClient(config.profile)
-    system_prompt = build_system_prompt(workspace)
+    # M2 记忆注入（任务 2.1/2.2）：规则全量 + 记忆 Top-N，现读现注入（FR-20/21）
+    memory_store = MemoryStore(
+        global_path=Path.home() / ".glaucous" / "memory.json",
+        project_path=workspace / ".glaucous" / "memory.json",
+    )
+    system_prompt = build_system_prompt(
+        workspace,
+        rules=load_rules(workspace),
+        memory=memory_store.load_injection(config.memory_top_n),
+    )
     if resume_id is not None:
         history, state = resume_history(workspace, resume_id, system_prompt)
     else:
@@ -284,7 +345,13 @@ async def repl(workspace: Path, resume_id: str | None) -> None:
     ws = Workspace(workspace, read_only_extra=config.read_only_extra)
     audit = AuditLog(workspace / ".glaucous" / "audit.log")
     pipeline = ApprovalPipeline(state, callback=make_decision_callback(), audit=audit)
-    registry = build_registry(ws, state, pipeline)
+    # M2 上下文目录（任务 2.5/2.7）：L0 落盘与方案存档均在 .glaucous 下
+    outputs_dir = workspace / ".glaucous" / "outputs"
+    plans_dir = workspace / ".glaucous" / "plans"
+    registry = build_registry(
+        ws, state, pipeline, memory_store=memory_store,
+        outputs_dir=outputs_dir, plans_dir=plans_dir,
+    )
 
     # 本轮是否有流式正文：自然终止路径终答已实时打印，仅需补换行；
     # 终止诊断路径已由 diagnostic 事件交付（自带换行），无需再补
@@ -295,7 +362,10 @@ async def repl(workspace: Path, resume_id: str | None) -> None:
             stream_state["printed"] = True
         render_event(event, payload, state)
 
-    loop = AgentLoop(llm, registry, history, state, max_steps=config.max_steps, on_event=on_event)
+    loop = AgentLoop(
+        llm, registry, history, state, max_steps=config.max_steps, on_event=on_event,
+        context_limit=config.context_limit, outputs_dir=outputs_dir, plans_dir=plans_dir,
+    )
 
     while True:
         try:

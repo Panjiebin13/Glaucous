@@ -44,3 +44,17 @@
 
 > 1.1~1.6 代码已按 SDD 流程（Plan Review 2 轮 + Code Review 8 轮，含分类器复合命令/管道/引号/重定向安全修复）完成编码；
 > 按用户要求本轮未做运行验证，M1 验收（场景 A/C）待环境就绪后执行；测试债务登记于 Plan §9 由 M4 偿还。
+
+### Day 4 / M2 记忆与上下文（8/30）
+
+- [x] 2.1 glaucous.md 双层注入：extensions/rules.py（全局 ~/.glaucous/glaucous.md + 项目 <workspace>/glaucous.md，超 4000 字符附提醒），build_system_prompt 注入段（FR-20）
+- [x] 2.2 memory_save：extensions/memory.py MemoryStore（双作用域 JSON 存储、原子写、去重刷新 last_used、Top-N 注入），tools/memory_tool.py（FR-21/22）
+- [x] 2.3 ask_user：tools/interactive.py + CLI 提问卡回调（EOF→「用户未响应」控制信号，非交互环境不挂死）；BASE_PROMPT 增求助节奏引导（FR-17/18/19）
+- [x] 2.4 Token 记账：context/budget.py（ASCII/4+CJK/1.5 估算、70%/85% 两档、build_report）+ loop 守卫点接线 + budget 占用条事件渲染（FR-25/31）
+- [x] 2.5 L0 输出截断：safety/output_limit.py（>300 行或 >50KB，头 200+尾 50，完整输出落盘 outputs/）+ tools/output.py read_output 分段回取（单次≤1000 行）
+- [x] 2.6 L1 裁剪：history._meta 记账入史 + context/compactor.trim_history（_meta 派生一行摘要、最近 K=2 轮豁免、_trimmed 幂等、submit_plan 决策回喂保留锚行原文）
+- [x] 2.7 L2 压缩：compactor.compact_history（早期历史压成≤500 字合成摘要消息 + 最新方案锚段；失败降级 L1 加深，连续失败 2 次且仍 critical 走终止③）；SubmitPlanTool 方案落盘 .glaucous/plans/ + 决策回喂附锚行 + history.view() 视图层锚替换（方案全文不常驻 API 视图，概设 §5.2）+ ReadPlanTool 回读
+- [x] 2.8 基线回归：既有 65 用例全绿（python -m pytest tests/ -q）；Code-First 测试债务（Day4 新增模块单测）登记于 Plan §9，由 M4 偿还；端到端验证（场景 B/E）按用户决定留待自行在 WSL 环境验证
+
+> 2.1~2.7 代码已按 SDD 流程（spec Review 2 轮阻塞归零 + Code Review 待进行）完成编码；
+> 上下文压缩管线（L1/L2/锚替换/预算终止）为纯内存变换，会话 JSONL 保留全量原文（resume 后重新裁剪）。

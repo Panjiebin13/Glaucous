@@ -26,6 +26,12 @@ from ..tools.base import ToolResult
 
 SESSION_META_TYPE = "session_meta"
 
+# 视图变换（Day4 Plan D11）：方案全文不常驻上下文（概设 §5.2）——
+# 发给 API 的视图中，submit_plan 的 arguments.plan 被确定性替换为锚文本；
+# 内部存储与 JSONL 保留原文（D1 全量落盘，非模型上下文）
+ANCHOR_TOOL_NAME = "submit_plan"
+PLAN_ANCHOR_TEXT = "【方案锚】方案全文已存档至 .glaucous/plans/，可调用 read_plan 回读全文"
+
 
 @dataclass
 class ToolMessage:
@@ -76,12 +82,26 @@ class History:
         self._append(entry)
 
     def push_tool(self, call: ToolCall, result: ToolResult) -> None:
-        """工具结果入史：失败结果同样入史（错误即控制信号，模型据此自纠）。"""
-        self._append(self._tool_entry(call.id, call.name, result.content))
+        """工具结果入史：失败结果同样入史（错误即控制信号，模型据此自纠）。
+
+        附带 _meta（base.py 执行时记账的五字段）与 _trimmed（L1 幂等标记）——
+        概设 §4.2「执行时记账，裁剪时派生」：L1 裁剪不调模型，直接由 _meta
+        拼接一行摘要。submit_plan 结果额外标记 _anchor（L1 保留锚行原文，
+        Day4 Plan §4.6「压缩时显式保留方案轻量锚」的 L1 层落实）。
+        """
+        entry = self._tool_entry(call.id, call.name, result.content)
+        entry["_meta"] = dict(result.metadata) if result.metadata else {}
+        entry["_trimmed"] = False
+        if call.name == ANCHOR_TOOL_NAME:
+            entry["_anchor"] = True
+        self._append(entry)
 
     def push_raw_tool(self, message: ToolMessage) -> None:
         """直接入史一条工具消息（熔断善后：为悬空 call_id 补推 ok=False 结果）。"""
-        self._append(self._tool_entry(message.call_id, message.name, message.content))
+        entry = self._tool_entry(message.call_id, message.name, message.content)
+        entry["_meta"] = {}  # 善后产物无记账，L1 派生降级格式（Day4 Plan §4.6）
+        entry["_trimmed"] = False
+        self._append(entry)
 
     def _append(self, entry: dict[str, Any]) -> None:
         """入史并立即落盘（若启用持久化）——崩溃最多丢当前这一条，不产生损坏行。"""
@@ -99,9 +119,55 @@ class History:
 
     # -- 读取与恢复 ---------------------------------------------------------
 
+    @property
+    def messages(self) -> list[dict[str, Any]]:
+        """内部消息列表（含 "_" 前缀内部键）——仅供上下文管理组件
+        （budget 估算 / compactor 裁剪压缩）原位读写；发给 API 一律走 view()。"""
+        return self._messages
+
     def view(self) -> list[dict[str, Any]]:
-        """生成发给 API 的完整消息序列（system + 全部历史）。"""
-        return [{"role": "system", "content": self.system_prompt}, *self._messages]
+        """生成发给 API 的完整消息序列（system + 全部历史）。
+
+        视图变换（Day4 Plan §3/D11，纯函数、不改内部状态、幂等，resume 重放
+        同样生效）：
+        - 剥除 "_" 前缀内部键——含内部键的 entry 返回浅拷贝再过滤，无内部键的
+          entry 沿用原引用（不原地删改，保住单一数据源）；
+        - submit_plan 的 arguments.plan 替换为锚文本（方案全文不常驻上下文，
+          概设 §5.2）；JSON 解析失败时整体替换为 {"plan": 锚文本}，不抛错。
+        """
+        return [
+            {"role": "system", "content": self.system_prompt},
+            *(self._public_entry(entry) for entry in self._messages),
+        ]
+
+    def _public_entry(self, entry: dict[str, Any]) -> dict[str, Any]:
+        """单条消息的视图变换：剥内部键 + 方案锚替换（详见 view()）。"""
+        public: dict[str, Any] | None = None
+        if any(key.startswith("_") for key in entry):
+            public = {k: v for k, v in entry.items() if not k.startswith("_")}
+        source = public if public is not None else entry
+        calls = source.get("tool_calls")
+        if source.get("role") == "assistant" and calls:
+            if any(c.get("function", {}).get("name") == ANCHOR_TOOL_NAME for c in calls):
+                if public is None:
+                    public = dict(entry)
+                public["tool_calls"] = [self._anchor_call(c) for c in calls]
+        return public if public is not None else entry
+
+    @staticmethod
+    def _anchor_call(call: dict[str, Any]) -> dict[str, Any]:
+        """submit_plan 调用的 arguments 锚替换；其他调用原样返回。"""
+        fn = call.get("function", {})
+        if fn.get("name") != ANCHOR_TOOL_NAME:
+            return call
+        try:
+            args = json.loads(fn.get("arguments") or "{}")
+        except json.JSONDecodeError:
+            args = {}
+        if not isinstance(args, dict):
+            args = {}
+        args["plan"] = PLAN_ANCHOR_TEXT
+        return {**call, "function": {**fn, "arguments": json.dumps(args, ensure_ascii=False)}}
 
     # -- 会话文件管理 -------------------------------------------------------
 

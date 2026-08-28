@@ -6,6 +6,8 @@
 - GLAUCOUS_MODEL               模型名，默认 deepseek-v4-flash
 - GLAUCOUS_TEMPERATURE         采样温度，默认 0.2
 - GLAUCOUS_READONLY_EXTRA      区外只读白名单路径（冒号/分号分隔），环境探测免审批（概设 §5.4）
+- GLAUCOUS_CONTEXT_LIMIT       上下文 token 上限（预算/压缩/占用条共用，默认 128000，M2 Day4）
+- GLAUCOUS_MEMORY_TOP_N        事实记忆注入条数上限（存储全量、注入 Top-N，默认 50，M2 Day4）
 """
 
 from __future__ import annotations
@@ -20,6 +22,12 @@ DEFAULT_TEMPERATURE = 0.2
 
 # 主循环步数上限（概设 §4.1 终止条件②：防死循环的硬熔断，默认 50 步可配）
 DEFAULT_MAX_STEPS = 50
+
+# 上下文 token 上限（概设 §4.2：L1/L2 压缩阈值与占用条共用同一 limit）
+DEFAULT_CONTEXT_LIMIT = 128_000
+
+# 事实记忆注入条数上限（概设 §7.2：条目数超限时按最近使用加权裁剪）
+DEFAULT_MEMORY_TOP_N = 50
 
 
 class ConfigError(RuntimeError):
@@ -43,6 +51,8 @@ class Config:
     profile: LLMProfile
     max_steps: int
     read_only_extra: tuple[Path, ...] = field(default_factory=tuple)
+    context_limit: int = DEFAULT_CONTEXT_LIMIT
+    memory_top_n: int = DEFAULT_MEMORY_TOP_N
 
 
 def load_profile(env: dict[str, str] | None = None) -> LLMProfile:
@@ -87,7 +97,21 @@ def load_config(env: dict[str, str] | None = None) -> Config:
     raw_steps = source.get("GLAUCOUS_MAX_STEPS", "").strip()
     if raw_steps.isdigit() and int(raw_steps) > 0:
         max_steps = int(raw_steps)
-    return Config(profile=profile, max_steps=max_steps, read_only_extra=_load_read_only_extra(source))
+    return Config(
+        profile=profile,
+        max_steps=max_steps,
+        read_only_extra=_load_read_only_extra(source),
+        context_limit=_load_positive_int(source, "GLAUCOUS_CONTEXT_LIMIT", DEFAULT_CONTEXT_LIMIT),
+        memory_top_n=_load_positive_int(source, "GLAUCOUS_MEMORY_TOP_N", DEFAULT_MEMORY_TOP_N),
+    )
+
+
+def _load_positive_int(source: dict[str, str], key: str, default: int) -> int:
+    """解析正整数配置（非数字/非正值回退默认，配置错误不阻断启动）。"""
+    raw = source.get(key, "").strip()
+    if raw.isdigit() and int(raw) > 0:
+        return int(raw)
+    return default
 
 
 def _load_read_only_extra(source: dict[str, str]) -> tuple[Path, ...]:
