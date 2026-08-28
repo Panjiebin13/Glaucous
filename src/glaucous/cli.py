@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -44,7 +45,7 @@ from .tools.shell import BashTool
 from .ui.prompts import build_system_prompt
 
 BANNER = (
-    "☁ Glaucous · coding agent（M1 权限成型）\n"
+    "☁ Glaucous · coding agent（M2 记忆与上下文）\n"
     "雨过天青，海鸥滑翔，代码自有清凉\n"
     "输入任务开始对话，/exit 退出。Plan 只读探索，Build 写操作走审批。"
 )
@@ -222,6 +223,22 @@ def prompt_plan_decision(plan: str) -> PlanDecision:
         print("  无效选择，请输入 1、2 或 3。")
 
 
+def _ansi_enabled() -> bool:
+    """ANSI 颜色开关：仅交互式终端启用（M3 rich 主题前的轻量实现）。
+
+    Windows conhost 需 os.system("") 启用 VT 处理（无害空命令）；
+    WSL/macOS 终端原生支持；重定向/管道一律纯文本。
+    """
+    if not sys.stdout.isatty():
+        return False
+    if os.name == "nt":
+        os.system("")
+    return True
+
+
+_ANSI = _ansi_enabled()
+
+
 def render_event(event: str, payload: dict[str, Any], state: SessionState) -> None:
     """loop 事件 → 纯文本渲染（⏺ 动作行 / ⎿ 结果行，学 Claude Code 的密度）。"""
     if event == "text":
@@ -242,7 +259,10 @@ def render_event(event: str, payload: dict[str, Any], state: SessionState) -> No
         filled = round(ratio * 12)
         bar = "█" * filled + "░" * (12 - filled)
         note = {"warn": "（建议压缩对话）", "critical": "（上下文即将压缩）"}.get(payload["level"], "")
-        print(f"  ctx {ratio:6.1%} [{bar}] {used // 1000}k/{limit // 1000}k tokens {note}")
+        line = f"  ctx {ratio:6.1%} [{bar}] {used // 1000}k/{limit // 1000}k tokens {note}"
+        # 三档配色：low 绿 / warn 黄 / critical 红（与压缩阈值同一档位判定）
+        color = {"warn": "\033[33m", "critical": "\033[31m"}.get(payload["level"], "\033[32m")
+        print(f"{color}{line}\033[0m" if _ANSI else line)
     elif event == "tool_start":
         call = payload["call"]
         brief = call.arguments if len(call.arguments) <= 80 else call.arguments[:80] + "…"
