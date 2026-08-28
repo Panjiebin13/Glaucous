@@ -8,6 +8,9 @@ config.toml
 # 本地 AI 助手工作记忆
 .aime/
 
+# IDE 本地缓存
+.qoder/
+
 # Python
 __pycache__/
 *.py[cod]
