@@ -15,11 +15,12 @@ from __future__ import annotations
 from .risk import Risk
 from .workspace import Workspace
 
-# 首词白名单：只读探测命令（POSIX 面向 Linux 一等公民；Windows cmd 命令未命中按保守升级 WRITE）
+# 首词白名单：只读探测命令（POSIX 面向 Linux 一等公民；Windows cmd 命令未命中按保守升级 WRITE）。
+# cd 无害（子进程 cwd 由工具控制为工作区，段内跳目录不影响后续段独立定级）
 SAFE_COMMANDS: frozenset[str] = frozenset(
     {
         "ls", "cat", "head", "tail", "wc", "find", "pwd", "which", "echo",
-        "git", "rg", "grep", "sed", "awk",
+        "git", "rg", "grep", "sed", "awk", "cd",
     }
 )
 
@@ -173,7 +174,7 @@ class CommandClassifier:
                 if risk != Risk.SAFE:
                     return risk, f"{first} 读取路径指向 {token}"
             return Risk.SAFE, f"{first} 只读命令"
-        if first in ("ls", "find", "echo", "pwd", "which", "wc"):
+        if first in ("ls", "find", "echo", "pwd", "which", "wc", "cd"):
             return Risk.SAFE, f"{first} 只读/探测命令"
         return Risk.SAFE, "白名单只读命令"
 

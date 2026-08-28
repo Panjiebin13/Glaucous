@@ -26,21 +26,21 @@
 - [x] 0.12 submit_plan + 三选一切换确认（简版交互）
 - [x] 0.13 edit 前打印 diff、用户 y/n 确认（审批的雏形）
 - [x] 0.14 会话 JSONL 落盘（--resume 可续）
-- [ ] 0.15 端到端验证：真实小项目完整走一遍修 bug 流程（按用户要求本轮未执行）
+- [x] 0.15 端到端验证：真实小项目完整走一遍修 bug 流程（2026-08-28 用户环境实测通过）
 
 > 0.9~0.14 代码已按 SDD 流程（Plan Review 2 轮 + Code Review 2 轮）完成编码；
-> 按用户要求本轮未做运行验证，M0 验收（需求→探索→方案→授权→修改→汇报）待环境就绪后执行。
+> ✅ **M0 验收已通过**（2026-08-28）：任务 0.15 端到端验证完成（需求→探索→方案→授权→修改→汇报）。
 
 ### Day 3 / M1 权限成型（8/29）
 
 - [x] 1.1 工作区沙箱：realpath 规范化 + 前缀校验 + 符号链接解析；未指定默认当前目录
-- [x] 1.2 危险命令分类器：首词白名单 + 参数模式表；未识别保守升级
+- [x] 1.2 危险命令分类器：首词白名单 + 参数模式表；未识别保守升级（后记：M1 验收实测后 cd 加入 SAFE 白名单——无害探测命令，复合段仍独立定级，65 用例全绿）
 - [x] 1.3 Build 审批三选项：同意 / 同意同类型 / 拒绝附理由；结构化回喂
 - [x] 1.4 授权策略：per-action / auto-approve；auto-approve 仍拦区外+破坏性
 - [x] 1.5 Plan 模式 bash 白名单（只放行 SAFE）
 - [x] 1.6 审计日志 audit.log
-- [ ] 1.7 单测：沙箱逃逸、分类器正反例、审批流、auto-approve 守卫（按用户要求本轮未执行，登记 M4 测试债务）
-- [ ] 1.8 stdin 输入净化：Windows cp936 终端中文输入经 surrogateescape 产生孤立代理字符（如 \udcef），发往 LLM API / 写会话 JSONL 时抛 `UnicodeEncodeError: surrogates not allowed`（WSL 中文输入实测复现）；修复方案：`main()` 对 `sys.stdin` 做 `reconfigure(errors="replace")`，并对 `input()` 结果做代理字符净化——还原原始字节后先按 UTF-8 尝试、失败按 GBK 二次解码（登记为待修技术债务）
+- [x] 1.7 单测：沙箱逃逸、分类器正反例、审批流、auto-approve 守卫（2026-08-28 补齐，61 用例全绿：test_workspace_escape / test_classifier / test_approval_flow / test_autoprivilege_guard；模式工具暴露矩阵、循环审批拦截不计熔断等扩展项仍留 M4）
+- [x] 1.8 stdin 输入净化：Windows cp936 终端中文输入经 surrogateescape 产生孤立代理字符（如 \udcef），发往 LLM API / 写会话 JSONL 时抛 `UnicodeEncodeError: surrogates not allowed`（WSL 中文输入实测复现）；修复：cli.py 新增 `sanitize_input()`，对全部 4 处 `input()` 结果净化——无代理原样放行；有则还原原始字节按 UTF-8 → GBK → replace 降级（保留 surrogateescape 以便 GBK 二次解码，故不对 stdin reconfigure replace）；已验证 UTF-8/GBK 还原与兜底可编码
 
 > 1.1~1.6 代码已按 SDD 流程（Plan Review 2 轮 + Code Review 8 轮，含分类器复合命令/管道/引号/重定向安全修复）完成编码；
 > 按用户要求本轮未做运行验证，M1 验收（场景 A/C）待环境就绪后执行；测试债务登记于 Plan §9 由 M4 偿还。

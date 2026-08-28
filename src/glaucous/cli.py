@@ -46,6 +46,28 @@ BANNER = (
 # 结果摘要最多展示的行数（渐进披露：长输出只露尾部摘要，M3 折叠升级）
 RESULT_TAIL_LINES = 3
 
+
+def sanitize_input(raw: str) -> str:
+    """净化输入中的孤立代理字符（TODO 1.8：surrogates not allowed 崩溃修复）。
+
+    cp936 终端下 stdin 以 surrogateescape 解码，非法 UTF-8 字节（如中文/全角
+    标点的首字节 0xEF）变成 \\udcXX 孤立代理，后续发往 LLM API / 写会话
+    JSONL 时 UTF-8 编码必然崩溃。处理：无代理字符原样返回；有则还原原始
+    字节，按 UTF-8 → GBK（cp936 终端二次解码）→ replace 的顺序降级，
+    保证返回值永远可被 UTF-8 编码。
+    """
+    try:
+        raw.encode("utf-8")
+        return raw
+    except UnicodeEncodeError:
+        data = raw.encode("utf-8", "surrogateescape")
+        for encoding in ("utf-8", "gbk"):
+            try:
+                return data.decode(encoding)
+            except UnicodeDecodeError:
+                continue
+        return data.decode("utf-8", errors="replace")
+
 # resume 时回放的最近消息条数（仅 UI 摘要，History 本身全量加载）
 RESUME_PREVIEW_MESSAGES = 6
 
@@ -113,9 +135,9 @@ def make_decision_callback():
         while True:
             try:
                 if dangerous:
-                    raw = input("  [a] 同意  [c] 拒绝(附理由): ").strip()
+                    raw = sanitize_input(input("  [a] 同意  [c] 拒绝(附理由): ")).strip()
                 else:
-                    raw = input("  [a] 同意  [b] 同意同类型  [c] 拒绝(附理由): ").strip()
+                    raw = sanitize_input(input("  [a] 同意  [b] 同意同类型  [c] 拒绝(附理由): ")).strip()
             except (EOFError, KeyboardInterrupt):
                 print()
                 return ApprovalDecision(choice="reject", reason="用户中断审批")
@@ -124,7 +146,7 @@ def make_decision_callback():
             if not dangerous and raw in ("b", "B"):
                 return ApprovalDecision(choice="approve_type")
             if raw in ("c", "C", "n", "N"):
-                reason = input("  拒绝理由（可留空）: ").strip() or None
+                reason = sanitize_input(input("  拒绝理由（可留空）: ")).strip() or None
                 return ApprovalDecision(choice="reject", reason=reason)
             print("  无效输入，请重试。")
 
@@ -142,7 +164,7 @@ def prompt_plan_decision(plan: str) -> PlanDecision:
     print("  ③ 继续讨论一下")
     while True:
         try:
-            raw = input("  请选择 [1/2/3]（③可附加反馈，格式：3 反馈内容）: ").strip()
+            raw = sanitize_input(input("  请选择 [1/2/3]（③可附加反馈，格式：3 反馈内容）: ")).strip()
         except (EOFError, KeyboardInterrupt):
             print()
             return PlanDecision(choice=CHOICE_KEEP_PLANNING, feedback=None)
@@ -277,7 +299,7 @@ async def repl(workspace: Path, resume_id: str | None) -> None:
 
     while True:
         try:
-            task = input(f"\n{prompt_symbol(state)}").strip()
+            task = sanitize_input(input(f"\n{prompt_symbol(state)}")).strip()
         except (EOFError, KeyboardInterrupt):
             print("\n🌅 再见。")
             return
