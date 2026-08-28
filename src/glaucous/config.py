@@ -6,7 +6,7 @@ Day 1 采用环境变量单模型方案（models.toml 注册表是 M3.4 任务�
 环境变量约定（概设 §9）：
 - GLAUCOUS_BASE_URL      OpenAI 兼容网关地址，默认 https://api.deepseek.com/v1
 - GLAUCOUS_API_KEY       API 密钥，缺失时启动即报错退出（凭据只经环境变量提供，绝不入库）
-- GLAUCOUS_MODEL         模型名，默认 deepseek-chat
+- GLAUCOUS_MODEL         模型名，默认 deepseek-v4-flash
 - GLAUCOUS_TEMPERATURE   采样温度，默认 0.2
 
 M3.4 迁移说明：models.toml 注册表落地后由注册表接管模型路由，
@@ -19,7 +19,7 @@ import os
 from dataclasses import dataclass
 
 DEFAULT_BASE_URL = "https://api.deepseek.com/v1"
-DEFAULT_MODEL = "deepseek-chat"
+DEFAULT_MODEL = "deepseek-v4-flash"
 DEFAULT_TEMPERATURE = 0.2
 
 # 主循环步数上限（概设 §4.1 终止条件②：防死循环的硬熔断，默认 50 步可配）

@@ -21,7 +21,7 @@ glaucous --workspace /path/to/project
 |------|------|------|
 | `GLAUCOUS_API_KEY` | API 密钥（必填） | — |
 | `GLAUCOUS_BASE_URL` | OpenAI 兼容网关 | `https://api.deepseek.com/v1` |
-| `GLAUCOUS_MODEL` | 模型名 | `deepseek-chat` |
+| `GLAUCOUS_MODEL` | 模型名 | `deepseek-v4-flash` |
 | `GLAUCOUS_TEMPERATURE` | 采样温度 | `0.2` |
 | `GLAUCOUS_MAX_STEPS` | 主循环步数上限 | `50` |
 
