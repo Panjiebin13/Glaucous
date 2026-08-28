@@ -1,6 +1,6 @@
-"""bash 工具：工作区内执行 shell 命令（Day 2 任务 0.9）。
+"""bash 工具：工作区内执行 shell 命令（Day 2 任务 0.9，M1 接入分类器）。
 
-设计要点（Day2 Plan §4.2，概设 §5.6）：
+设计要点（Day3 Plan §4.2/§4.5，概设 §5.5）：
 - asyncio 子进程编排，cwd=工作区；Linux 一等公民，Windows 走 cmd（FR-34 基本兼容）；
 - 超时：wait_for 到期 kill 进程并收尸，回喂部分输出；
 - Ctrl+C（CancelledError）同样 kill 子进程后 re-raise——不留僵尸进程，
@@ -9,15 +9,20 @@
 - 输出防爆：合并 stdout+stderr 超过 300 行保留尾部（L0 正式策略是 M2 任务 2.5）；
 - 退出码语义：非零退出码 ok=True（退出码是业务信息，模型据此定位测试失败）；
   执行过程异常（超时/无法启动）才 ok=False；
-- 先全部放行：无分类器、无白名单（M1 任务 1.2/1.5 收口；期间仅可信环境使用）。
+- M1 分类器：build_approval 经 CommandClassifier 定级——SAFE 免审（Plan/Build 均放行）；
+  WRITE/DANGEROUS 走审批管线；Plan 模式在声明层之外由 dispatch 模式校验+审批共同保障
+  （Plan 仅 SAFE，写命令被审批拦截「当前处于 Plan 模式，该命令会修改状态」）。
 """
 
 from __future__ import annotations
 
 import asyncio
-from pathlib import Path
 from typing import Any
 
+from ..permission.approval import ApprovalAction
+from ..permission.classifier import CommandClassifier
+from ..permission.risk import Risk
+from ..permission.workspace import Workspace
 from .base import Tool, ToolResult
 
 # 输出防爆上限：超过则保留尾部（上下文防爆最小措施，M2 L0 收口）
@@ -47,8 +52,27 @@ class BashTool(Tool):
         "required": ["command"],
     }
 
-    def __init__(self, workspace: Path):
+    def __init__(self, workspace: Workspace, classifier: CommandClassifier | None = None):
         self._workspace = workspace
+        self._classifier = classifier or CommandClassifier(workspace)
+
+    def build_approval(self, args: dict[str, Any], mode: str) -> ApprovalAction | None:
+        """命令分类定级：SAFE 无需审批；WRITE/DANGEROUS 构造审批动作。
+
+        命令内路径区外判定由分类器完成（注入 workspace，概设 §5.4）。
+        Plan 模式的写命令拦截由 dispatch 统一处理（base.py，mode==plan 时回喂
+        「当前处于 Plan 模式」），此处只负责定级与构造审批动作。
+        """
+        command = str(args.get("command", ""))
+        risk, note = self._classifier.classify(command)
+        if risk == Risk.SAFE:
+            return None
+        return ApprovalAction(
+            kind="bash_command",
+            target=command,
+            detail=note,
+            risk=risk,
+        )
 
     async def execute(self, command: str = "", timeout: int | None = None, **_: Any) -> ToolResult:
         if not command.strip():
@@ -59,7 +83,7 @@ class BashTool(Tool):
         try:
             proc = await asyncio.create_subprocess_shell(
                 command,
-                cwd=self._workspace,
+                cwd=self._workspace.root,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )

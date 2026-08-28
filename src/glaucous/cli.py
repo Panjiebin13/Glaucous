@@ -1,10 +1,11 @@
-"""简版 CLI：input 循环 + print 输出（Day 2：双模式 + 审批 + 会话恢复）。
+"""简版 CLI：input 循环 + print 输出（Day 3：权限管线 + 审批三选项 + 审计）。
 
-Day 2 产出（计划表 0.8~0.14）：
+产出（计划表 0.8~1.6）：
 - 模式化提示符（🌊 plan > / 🌊 build >）；
 - submit_plan 三选一交互（①每次请求权限 ②同意所有权限 ③继续讨论）；
-- 写操作 y/n 审批（per-action）/ auto-approve 放行（任务 0.13 雏形）；
-- 会话 JSONL 落盘 + --resume 恢复续聊（任务 0.14）。
+- 审批三选项交互（per-action 时弹 [a]同意 [b]同意同类型 [c]拒绝附理由，
+  破坏性命令 ⚠ 警示）——auto-approve 下 DANGEROUS/区外仍单独确认（FR-10）；
+- 工作区沙箱 + 命令分类器 + 审计日志（M1 权限成型）。
 """
 
 from __future__ import annotations
@@ -20,6 +21,9 @@ from .agent.state import POLICY_AUTO_APPROVE, POLICY_PER_ACTION, SessionState
 from .config import ConfigError, load_config
 from .context.history import History
 from .llm.client import LLMClient
+from .permission.approval import ApprovalAction, ApprovalDecision, ApprovalPipeline, AuditLog
+from .permission.risk import Risk
+from .permission.workspace import Workspace
 from .tools.base import ToolRegistry
 from .tools.files import EditFileTool, ListDirTool, ReadFileTool, WriteFileTool
 from .tools.planning import (
@@ -34,9 +38,9 @@ from .tools.shell import BashTool
 from .ui.prompts import build_system_prompt
 
 BANNER = (
-    "☁ Glaucous · coding agent（M0 原型 · Day 2）\n"
+    "☁ Glaucous · coding agent（M1 权限成型）\n"
     "雨过天青，海鸥滑翔，代码自有清凉\n"
-    "输入任务开始对话，/exit 退出。Plan 模式只读探索，方案确认后进入 Build。"
+    "输入任务开始对话，/exit 退出。Plan 只读探索，Build 写操作走审批。"
 )
 
 # 结果摘要最多展示的行数（渐进披露：长输出只露尾部摘要，M3 折叠升级）
@@ -47,14 +51,14 @@ RESUME_PREVIEW_MESSAGES = 6
 
 
 def build_registry(
-    workspace: Path,
+    workspace: Workspace,
     state: SessionState,
-    approve,
+    pipeline: ApprovalPipeline,
 ) -> ToolRegistry:
-    """装配 Day 2 全量工具：三个只读 + bash + 双写 + submit_plan。
+    """装配 M1 全量工具：三个只读 + bash + 双写 + submit_plan。
 
-    submit_plan 的 confirm 回调与写工具的 approve 回调均由 CLI 注入，
-    工具层不感知终端（分层约定：tools 层无 UI 依赖）。
+    权限管线注入 registry（dispatch 层统一审批）；submit_plan 的 confirm 回调
+    由 CLI 注入；工具层不感知终端（分层约定：tools 层无 UI 依赖）。
     """
     registry = ToolRegistry()
     reader = ReadFileTool(workspace)
@@ -62,17 +66,18 @@ def build_registry(
     registry.register(ListDirTool(workspace, reader=reader))
     registry.register(GrepTool(workspace, reader=reader))
     registry.register(BashTool(workspace))
-    registry.register(WriteFileTool(workspace, reader=reader, approve=approve))
-    registry.register(EditFileTool(workspace, reader=reader, approve=approve))
+    registry.register(WriteFileTool(workspace, reader=reader))
+    registry.register(EditFileTool(workspace, reader=reader))
+    registry.set_approval_pipeline(pipeline)
 
     def confirm(plan: str) -> PlanDecision:
         """三选一交互：打印方案全文，读入 ①②③ 决策。
 
-        状态切换在此接线（Plan §4.4「回调内部改 state」契约）：
+        状态切换在此接线（Day2 Plan §4.4「回调内部改 state」契约）：
         ①② 立即 enter_build——决策回喂文案「已切换 Build 模式」与实际状态
         保持一致；③ 不改状态（留在 Plan 修订方案）。
         同轮一致性由 loop 的 mode 快照保证：切换后同轮幻觉写调用仍按
-        Plan 快照被 dispatch 拦截，approve 回调不会触达，无越权窗口。
+        Plan 快照被 dispatch 拦截，审批不会触达，无越权窗口。
         """
         decision = prompt_plan_decision(plan)
         if decision.choice == CHOICE_BUILD_PER_ACTION:
@@ -85,31 +90,45 @@ def build_registry(
     return registry
 
 
-def make_approve_callback(state: SessionState):
-    """写审批回调：per-action 弹 y/n（含 diff 展示）；auto-approve 放行并保持可见性。
+def make_decision_callback():
+    """审批三选项决策回调（per-action 弹三选项；auto-approve 守卫在 gate 内先行处理）。
 
-    Day 2 无危险命令分类器——auto-approve 不拦任何命令（M1 任务 1.2/1.4 收口）。
+    破坏性命令（DANGEROUS/区外写）用 ⚠ 警示 + 命令全文（M3 才 rich 主题，此处纯文本）。
     """
 
-    def approve(action: str, path: str, diff: str) -> bool:
-        if state.approval_policy == POLICY_AUTO_APPROVE:
-            print(f"\n  ⏺ {action} {path}（auto-approve 放行）")
-            return True
-        print(f"\n  ⏺ 需要确认：{action} {path}")
-        if diff:
-            diff_lines = diff.splitlines()
-            print("\n".join(f"    {line}" for line in diff_lines[:60]))
-            if len(diff_lines) > 60:
-                print(f"    …（diff 共 {len(diff_lines)} 行，已截断展示）")
-        try:
-            answer = input("  同意该写操作？[y/n] ").strip().lower()
-        except (EOFError, KeyboardInterrupt):
-            # 交互中断视为拒绝（安全侧），异常由 REPL 顶层兜底
-            print()
-            return False
-        return answer in ("y", "yes")
+    def decide(action: ApprovalAction) -> ApprovalDecision:
+        risk_note = {
+            Risk.DANGEROUS: " ⚠ 破坏性操作（不可批量放行）",
+            Risk.WRITE: "",
+            Risk.SAFE: "",
+        }.get(action.risk, "")
+        print(f"\n  ⏺ 需要确认：{action.kind} {action.target}{risk_note}")
+        if action.detail:
+            # diff/说明可能多行，只展示前 60 行
+            detail_lines = action.detail.splitlines()
+            print("\n".join(f"    {line}" for line in detail_lines[:60]))
+            if len(detail_lines) > 60:
+                print(f"    …（详情共 {len(detail_lines)} 行，已截断展示）")
+        dangerous = action.risk == Risk.DANGEROUS
+        while True:
+            try:
+                if dangerous:
+                    raw = input("  [a] 同意  [c] 拒绝(附理由): ").strip()
+                else:
+                    raw = input("  [a] 同意  [b] 同意同类型  [c] 拒绝(附理由): ").strip()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                return ApprovalDecision(choice="reject", reason="用户中断审批")
+            if raw in ("a", "A", "y", "Y"):
+                return ApprovalDecision(choice="approve")
+            if not dangerous and raw in ("b", "B"):
+                return ApprovalDecision(choice="approve_type")
+            if raw in ("c", "C", "n", "N"):
+                reason = input("  拒绝理由（可留空）: ").strip() or None
+                return ApprovalDecision(choice="reject", reason=reason)
+            print("  无效输入，请重试。")
 
-    return approve
+    return decide
 
 
 def prompt_plan_decision(plan: str) -> PlanDecision:
@@ -239,8 +258,11 @@ async def repl(workspace: Path, resume_id: str | None) -> None:
     else:
         history, state = History.create(system_prompt, workspace), SessionState()
 
-    approve = make_approve_callback(state)
-    registry = build_registry(workspace, state, approve)
+    # M1 权限管线：沙箱 + 审批 + 审计（概设 §5）
+    ws = Workspace(workspace, read_only_extra=config.read_only_extra)
+    audit = AuditLog(workspace / ".glaucous" / "audit.log")
+    pipeline = ApprovalPipeline(state, callback=make_decision_callback(), audit=audit)
+    registry = build_registry(ws, state, pipeline)
 
     # 本轮是否有流式正文：自然终止路径终答已实时打印，仅需补换行；
     # 终止诊断路径已由 diagnostic 事件交付（自带换行），无需再补

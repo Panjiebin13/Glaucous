@@ -1,12 +1,13 @@
 """文件工具：read_file / list_dir / write_file / edit_file。
 
-路径约定（Day1 Plan §4.3）：相对路径一律相对 workspace 解析，绝对路径原样——
-为 M1 工作区沙箱（realpath + 前缀校验）预留统一入口；Day 2 暂无沙箱。
+路径约定（M1 任务 1.1）：工具注入 Workspace 实例（permission/workspace.py），
+相对路径相对工作区解析，统一 resolve() 规范化；沙箱逃逸校验 + 只读白名单
+由 Workspace.classify_path 提供（Day3 Plan §4.5）。
 
-写工具设计（Day2 Plan §4.3，概设 §5.6）：
+写工具设计（Day3 Plan §4.3/§4.5）：
 - 仅 Build 模式可用（modes={"build"}，声明层隐藏 + 执行层兜底）；
-- 写前生成 unified diff 经 approve 回调请求用户确认（任务 0.13 审批雏形），
-  拒绝则不落盘并回喂拒绝文案——工具层不感知终端，回调由 CLI 注入；
+- 写前 diff 展示与审批**收敛到 dispatch 前的 approval.gate 管线**（三选项决策）；
+  工具内不再内嵌 y/n 回调（移除 ApproveCallback，Day3 B3 修复）；
 - edit_file 唯一匹配约束（概设 §5.6）：old 必须在文件中恰好出现一次，
   0 处/多处歧义均回喂引导而非静默选择，强迫先 read 后 edit。
 """
@@ -15,17 +16,16 @@ from __future__ import annotations
 
 import difflib
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
+from ..permission.approval import ApprovalAction
+from ..permission.risk import Risk
+from ..permission.workspace import Workspace
 from .base import MODE_BUILD, Tool, ToolResult
 
 # 输出防护上限：L0 截断（M2）前的最小上下文防爆措施，截断时显式标注
 MAX_READ_LINES = 2000
 UTF8 = "utf-8"
-
-# 写操作审批回调：展示动作/路径/diff，返回 True=放行 False=用户拒绝
-# （M1 审批三选项落地后本回调升级为决策对象，接口预留演进空间）
-ApproveCallback = Callable[[str, str, str], bool]
 
 
 class ReadFileTool(Tool):
@@ -47,13 +47,29 @@ class ReadFileTool(Tool):
         "required": ["path"],
     }
 
-    def __init__(self, workspace: Path):
+    def __init__(self, workspace: Workspace):
         self._workspace = workspace
 
     def resolve(self, path: str) -> Path:
-        """统一路径解析入口（M1 沙箱将在此追加边界校验）。"""
-        p = Path(path)
-        return p if p.is_absolute() else self._workspace / p
+        """统一路径解析入口（沙箱已内置逃逸校验 + 只读白名单）。"""
+        return self._workspace.resolve(path)
+
+    def build_approval(self, args: dict[str, Any], mode: str) -> ApprovalAction | None:
+        """区外读触发审批（kind=file_read，FR-13「读取工作区外配置仍需单独同意」）。
+
+        区内/只读白名单 = SAFE 免审；区外 = WRITE 走审批（auto-approve 下仍单独确认）；
+        受保护目录（.glaucous/）读 = DANGEROUS（与 bash 分类器一致，防审计/会话被无感读取，S-C 修复）。
+        """
+        path = str(args.get("path", ""))
+        if not path:
+            return None
+        resolved = self._workspace.resolve(path)
+        if self._workspace.is_protected(resolved):
+            return ApprovalAction(kind="file_read", target=path, detail=f"read_file {path}", risk=Risk.DANGEROUS)
+        risk = self._workspace.classify_path(path)
+        if risk == Risk.SAFE:
+            return None
+        return ApprovalAction(kind="file_read", target=path, detail=f"read_file {path}", risk=Risk.WRITE)
 
     async def execute(self, path: str = "", offset: int = 1, limit: int | None = None, **_: Any) -> ToolResult:
         target = self.resolve(path)
@@ -97,12 +113,26 @@ class ListDirTool(Tool):
         },
     }
 
-    def __init__(self, workspace: Path, reader: ReadFileTool | None = None):
+    def __init__(self, workspace: Workspace, reader: ReadFileTool | None = None):
         self._workspace = workspace
         self._reader = reader
 
+    def build_approval(self, args: dict[str, Any], mode: str) -> ApprovalAction | None:
+        """区外目录浏览触发审批（kind=file_read 语义，FR-13）。
+
+        受保护目录（.glaucous/）浏览 = DANGEROUS（S-C 修复，与 bash 一致）。
+        """
+        path = str(args.get("path", "."))
+        resolved = self._workspace.resolve(path)
+        if self._workspace.is_protected(resolved):
+            return ApprovalAction(kind="file_read", target=path, detail=f"list_dir {path}", risk=Risk.DANGEROUS)
+        risk = self._workspace.classify_path(path)
+        if risk == Risk.SAFE:
+            return None
+        return ApprovalAction(kind="file_read", target=path, detail=f"list_dir {path}", risk=Risk.WRITE)
+
     async def execute(self, path: str = ".", **_: Any) -> ToolResult:
-        target = self._reader.resolve(path) if self._reader else (self._workspace / path if path else self._workspace)
+        target = self._reader.resolve(path) if self._reader else self._workspace.resolve(path if path else ".")
         if not target.exists():
             return ToolResult(ok=False, content=f"路径不存在: {target}")
         if not target.is_dir():
@@ -121,13 +151,16 @@ class ListDirTool(Tool):
 
 
 class WriteFileTool(Tool):
-    """写入文件（新建或覆盖整文件），写前经 approve 回调展示 diff。"""
+    """写入文件（新建或覆盖整文件）。
+
+    审批已收敛到 dispatch 前的 approval.gate（三选项决策，Day3 B3 修复）——
+    工具只负责生成 diff 供审批展示与执行落地；.glaucous/ 写排除在 execute 兜底。
+    """
 
     name = "write_file"
     description = (
         "写入文件（新建或整文件覆盖）。父目录不存在时自动创建。"
-        "写入前会向用户展示 diff 并请求确认。"
-        "仅 Build 模式可用。"
+        "写入前会向用户展示 diff 并请求确认。仅 Build 模式可用。"
     )
     parameters = {
         "type": "object",
@@ -138,50 +171,43 @@ class WriteFileTool(Tool):
         "required": ["path", "content"],
     }
     modes = frozenset({MODE_BUILD})
+    risk = Risk.WRITE
 
-    def __init__(self, workspace: Path, reader: ReadFileTool | None = None, approve: ApproveCallback | None = None):
+    def __init__(self, workspace: Workspace, reader: ReadFileTool | None = None):
         self._workspace = workspace
         self._reader = reader
-        self._approve = approve
 
-    async def execute(self, path: str = "", content: str = "", **_: Any) -> ToolResult:
+    def build_approval(self, args: dict[str, Any], mode: str) -> ApprovalAction | None:
+        """构造审批动作：区内写 WRITE；区外写 DANGEROUS（守卫优先级，不可批量豁免）。
+
+        detail 携带 unified diff（写操作审批展示用，Day3 Plan §4.3）。
+        """
+        path = str(args.get("path", ""))
+        content = str(args.get("content", ""))
+        # 区内写 = WRITE（走审批）；区外/受保护/只读白名单写 = DANGEROUS（守卫优先级，
+        # 概设 §5.5 写区外）。注意不能用 classify_path 返回值（区内返回 SAFE 会污染审计标注），
+        # 也不能用 is_outside（白名单路径 is_read_only=True 会被误判为区内）
+        resolved = self._workspace.resolve(path)
+        if self._workspace.is_within(resolved) and not self._workspace.is_protected(resolved):
+            risk = Risk.WRITE
+        else:
+            risk = Risk.DANGEROUS
         target = self._resolve(path)
-        old_text = self._read_existing(target)
-        binary_overwrite = target.exists() and old_text is None
-
+        existing = self._read_existing(target)
+        old_lines = existing.splitlines() if existing is not None else []
         diff = _make_diff(
-            old_text.splitlines() if old_text is not None else [],
+            old_lines,
             content.splitlines(),
             str(target),
             f"{target}（修改后）",
-            # 旧侧「存在性」与「可解码」解耦：二进制覆盖旧侧标注存在但内容不可展示，
-            # 避免误导用户以为 action（覆盖二进制文件）与 diff 头（新建）矛盾
-            exists_before=target.exists(),
+            exists_before=existing is not None,
         )
-        # 二进制覆盖无法生成文本 diff（旧内容不可解码），审批动作单独标注——
-        # 「文件存在」与「可解码」两个判定分离，避免误导用户以为是新建；
-        # 该场景 diff 为全 + 行的退化形态，不传给审批展示
-        if binary_overwrite:
-            action = "覆盖二进制文件（无法生成 diff）"
-            diff = ""
-        elif old_text is not None:
-            action = "覆盖文件"
-        else:
-            action = "新建文件"
-        if not self._request_approval(action, path, diff):
-            return ToolResult(ok=False, content=f"用户已拒绝该写操作（{action} {path}），文件未修改。")
-
-        # 父目录自动创建：对齐业界工具行为，减少模型先 mkdir 的往返
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(content, encoding=UTF8, newline="\n")
-        line_count = content.count("\n") + 1 if content else 0
-        return ToolResult(ok=True, content=f"已写入 {path}（{line_count} 行）")
-
-    def _resolve(self, path: str) -> Path:
-        if self._reader is not None:
-            return self._reader.resolve(path)
-        p = Path(path)
-        return p if p.is_absolute() else self._workspace / p
+        return ApprovalAction(
+            kind="file_write",
+            target=path,
+            detail=diff or f"write_file {path}",
+            risk=risk,
+        )
 
     @staticmethod
     def _read_existing(target: Path) -> str | None:
@@ -193,18 +219,30 @@ class WriteFileTool(Tool):
         except UnicodeDecodeError:
             return None  # 二进制文件覆盖时 diff 退化为「整体替换」
 
-    def _request_approval(self, action: str, path: str, diff: str) -> bool:
-        """审批回调：无回调（测试/脚本场景）默认放行；拒绝则不落盘。"""
-        if self._approve is None:
-            return True
-        return self._approve(action, path, diff)
+    async def execute(self, path: str = "", content: str = "", **_: Any) -> ToolResult:
+        target = self._resolve(path)
+        if self._workspace.is_protected(target):
+            # 运行期目录（.glaucous/ 审计/会话）不可被 agent 写（防篡改，Day3 §4.6 S4）
+            return ToolResult(ok=False, content=f"禁止写入受保护目录: {target}")
+
+        # 父目录自动创建：对齐业界工具行为，减少模型先 mkdir 的往返
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding=UTF8, newline="\n")
+        line_count = content.count("\n") + 1 if content else 0
+        return ToolResult(ok=True, content=f"已写入 {path}（{line_count} 行）")
+
+    def _resolve(self, path: str) -> Path:
+        if self._reader is not None:
+            return self._reader.resolve(path)
+        return self._workspace.resolve(path)
 
 
 class EditFileTool(Tool):
-    """精确编辑文件：old 文本唯一匹配替换为 new，写前经 approve 回调展示 diff。
+    """精确编辑文件：old 文本唯一匹配替换为 new。
 
     唯一匹配约束（概设 §5.6）：old 恰好出现一次才执行；
     0 处/多处歧义回喂引导（强迫先 read 后 edit），replace_all=true 时全部替换。
+    审批收敛到 dispatch 前的 approval.gate；.glaucous/ 写排除在 execute 兜底。
     """
 
     name = "edit_file"
@@ -224,11 +262,51 @@ class EditFileTool(Tool):
         "required": ["path", "old", "new"],
     }
     modes = frozenset({MODE_BUILD})
+    risk = Risk.WRITE
 
-    def __init__(self, workspace: Path, reader: ReadFileTool | None = None, approve: ApproveCallback | None = None):
+    def __init__(self, workspace: Workspace, reader: ReadFileTool | None = None):
         self._workspace = workspace
         self._reader = reader
-        self._approve = approve
+
+    def build_approval(self, args: dict[str, Any], mode: str) -> ApprovalAction | None:
+        """构造审批动作：区内写 WRITE；区外写 DANGEROUS（守卫优先级）。
+
+        detail 携带替换前后 diff（审批展示用）。
+        """
+        path = str(args.get("path", ""))
+        # 区内写 = WRITE；区外/受保护/只读白名单写 = DANGEROUS（S-A 修复，见 WriteFileTool）
+        resolved = self._workspace.resolve(path)
+        if self._workspace.is_within(resolved) and not self._workspace.is_protected(resolved):
+            risk = Risk.WRITE
+        else:
+            risk = Risk.DANGEROUS
+        target = self._resolve(path)
+        old = str(args.get("old", ""))
+        new = str(args.get("new", ""))
+        replace_all = bool(args.get("replace_all", False))
+        diff = ""
+        # 空 old 防御：避免 text.count("") 恒 >0 产生误导性 diff（execute 层会拒绝）
+        if old and target.is_file():
+            try:
+                text = target.read_text(encoding=UTF8)
+            except UnicodeDecodeError:
+                text = ""
+            occurrences = text.count(old)
+            if occurrences > 0:
+                new_text = text.replace(old, new) if replace_all else text.replace(old, new, 1)
+                diff = _make_diff(
+                    text.splitlines(),
+                    new_text.splitlines(),
+                    str(target),
+                    f"{target}（修改后）",
+                    exists_before=True,
+                )
+        return ApprovalAction(
+            kind="file_write",
+            target=path,
+            detail=diff or f"edit_file {path}",
+            risk=risk,
+        )
 
     async def execute(
         self, path: str = "", old: str = "", new: str = "", replace_all: bool = False, **_: Any
@@ -238,6 +316,8 @@ class EditFileTool(Tool):
         if not old:
             return ToolResult(ok=False, content="old 不能为空，请提供要替换的文本。")
         target = self._resolve(path)
+        if self._workspace.is_protected(target):
+            return ToolResult(ok=False, content=f"禁止写入受保护目录: {target}")
         if not target.exists():
             return ToolResult(ok=False, content=f"文件不存在: {path}。新建文件请使用 write_file。")
         if not target.is_file():
@@ -265,17 +345,6 @@ class EditFileTool(Tool):
             )
 
         new_text = text.replace(old, new) if replace_all else text.replace(old, new, 1)
-        diff = _make_diff(
-            text.splitlines(),
-            new_text.splitlines(),
-            str(target),
-            f"{target}（修改后）",
-            exists_before=True,
-        )
-        action = f"编辑文件（替换 {occurrences if replace_all else 1} 处）"
-        if not self._request_approval(action, path, diff):
-            return ToolResult(ok=False, content=f"用户已拒绝该写操作（{action} {path}），文件未修改。")
-
         target.write_text(new_text, encoding=UTF8, newline="\n")
         if replace_all and occurrences > 1:
             return ToolResult(ok=True, content=f"已修改 {path}：替换 {occurrences} 处")
@@ -284,13 +353,7 @@ class EditFileTool(Tool):
     def _resolve(self, path: str) -> Path:
         if self._reader is not None:
             return self._reader.resolve(path)
-        p = Path(path)
-        return p if p.is_absolute() else self._workspace / p
-
-    def _request_approval(self, action: str, path: str, diff: str) -> bool:
-        if self._approve is None:
-            return True
-        return self._approve(action, path, diff)
+        return self._workspace.resolve(path)
 
 
 def _make_diff(

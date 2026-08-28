@@ -10,6 +10,9 @@ import re
 from pathlib import Path
 from typing import Any
 
+from ..permission.approval import ApprovalAction
+from ..permission.risk import Risk
+from ..permission.workspace import Workspace
 from .base import Tool, ToolResult
 from .files import UTF8, ReadFileTool
 
@@ -36,15 +39,30 @@ class GrepTool(Tool):
         "required": ["pattern"],
     }
 
-    def __init__(self, workspace: Path, reader: ReadFileTool | None = None):
+    def __init__(self, workspace: Workspace, reader: ReadFileTool | None = None):
         self._workspace = workspace
         self._reader = reader
+
+    def build_approval(self, args: dict[str, Any], mode: str) -> ApprovalAction | None:
+        """区外搜索触发审批（kind=file_read 语义，FR-13）。
+
+        受保护目录（.glaucous/）搜索 = DANGEROUS（S-C 修复，与 bash 一致）。
+        """
+        path = str(args.get("path", ""))
+        if not path:
+            return None
+        resolved = self._workspace.resolve(path)
+        if self._workspace.is_protected(resolved):
+            return ApprovalAction(kind="file_read", target=path, detail=f"grep {path}", risk=Risk.DANGEROUS)
+        risk = self._workspace.classify_path(path)
+        if risk == Risk.SAFE:
+            return None
+        return ApprovalAction(kind="file_read", target=path, detail=f"grep {path}", risk=Risk.WRITE)
 
     def _resolve(self, path: str) -> Path:
         if self._reader is not None:
             return self._reader.resolve(path)
-        p = Path(path) if path else self._workspace
-        return p if p.is_absolute() else self._workspace / p
+        return self._workspace.resolve(path if path else ".")
 
     async def execute(self, pattern: str = "", path: str = "", **_: Any) -> ToolResult:
         try:
@@ -95,7 +113,7 @@ class GrepTool(Tool):
             text = file_path.read_text(encoding=UTF8)
         except (UnicodeDecodeError, OSError, PermissionError):
             return  # 二进制/无权限文件静默跳过
-        rel = file_path.relative_to(self._workspace) if file_path.is_relative_to(self._workspace) else file_path
+        rel = file_path.relative_to(self._workspace.root) if file_path.is_relative_to(self._workspace.root) else file_path
         for line_no, line in enumerate(text.splitlines(), start=1):
             if regex.search(line):
                 matches.append(f"{rel.as_posix()}:{line_no}:{line.strip()}")

@@ -30,3 +30,17 @@
 
 > 0.9~0.14 代码已按 SDD 流程（Plan Review 2 轮 + Code Review 2 轮）完成编码；
 > 按用户要求本轮未做运行验证，M0 验收（需求→探索→方案→授权→修改→汇报）待环境就绪后执行。
+
+### Day 3 / M1 权限成型（8/29）
+
+- [x] 1.1 工作区沙箱：realpath 规范化 + 前缀校验 + 符号链接解析；未指定默认当前目录
+- [x] 1.2 危险命令分类器：首词白名单 + 参数模式表；未识别保守升级
+- [x] 1.3 Build 审批三选项：同意 / 同意同类型 / 拒绝附理由；结构化回喂
+- [x] 1.4 授权策略：per-action / auto-approve；auto-approve 仍拦区外+破坏性
+- [x] 1.5 Plan 模式 bash 白名单（只放行 SAFE）
+- [x] 1.6 审计日志 audit.log
+- [ ] 1.7 单测：沙箱逃逸、分类器正反例、审批流、auto-approve 守卫（按用户要求本轮未执行，登记 M4 测试债务）
+- [ ] 1.8 stdin 输入净化：Windows cp936 终端中文输入经 surrogateescape 产生孤立代理字符（如 \udcef），发往 LLM API / 写会话 JSONL 时抛 `UnicodeEncodeError: surrogates not allowed`（WSL 中文输入实测复现）；修复方案：`main()` 对 `sys.stdin` 做 `reconfigure(errors="replace")`，并对 `input()` 结果做代理字符净化——还原原始字节后先按 UTF-8 尝试、失败按 GBK 二次解码（登记为待修技术债务）
+
+> 1.1~1.6 代码已按 SDD 流程（Plan Review 2 轮 + Code Review 8 轮，含分类器复合命令/管道/引号/重定向安全修复）完成编码；
+> 按用户要求本轮未做运行验证，M1 验收（场景 A/C）待环境就绪后执行；测试债务登记于 Plan §9 由 M4 偿还。

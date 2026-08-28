@@ -24,11 +24,9 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..llm.client import ToolCall
-
-# 会话模式常量（与 agent.state.SessionState 共用字面量，避免跨层 import）
-MODE_PLAN = "plan"
-MODE_BUILD = "build"
-ALL_MODES = frozenset({MODE_PLAN, MODE_BUILD})
+from ..permission.approval import ApprovalAction, ApprovalPipeline
+from ..permission.modes import ALL_MODES, MODE_BUILD, MODE_PLAN
+from ..permission.risk import Risk
 
 
 class ParseCircuitBroken(RuntimeError):
@@ -57,12 +55,24 @@ class Tool:
     注册表据此生成 OpenAI tools 声明并在 dispatch 时做参数校验。
     modes 声明工具在哪些会话模式可见（声明层过滤 + 执行层校验，概设 §5.1）：
     默认两模式均可用；写工具仅 build；submit_plan 仅 plan。
+    risk 声明工具危险级（概设 §5.5）：默认 SAFE；写工具 WRITE；
+    bash 动态定级（分类器）。dispatch 权限管线据此决定审批路径。
     """
 
     name: str = ""
     description: str = ""
     parameters: dict[str, Any] = {}
     modes: frozenset[str] = ALL_MODES
+    risk: Risk = Risk.SAFE
+
+    def build_approval(self, args: dict[str, Any], mode: str) -> ApprovalAction | None:
+        """工具自定义审批动作（可选覆盖）：返回 None 表示无需审批。
+
+        写工具（files.py）据此基于解析后的参数构造 ApprovalAction；
+        bash（shell.py）在分类后构造；默认 None（SAFE 工具无审批）。
+        mode 传入供 Plan 模式语义判断（Plan 下写命令直接拦截而非走审批）。
+        """
+        return None
 
     async def execute(self, **kwargs: Any) -> ToolResult:
         raise NotImplementedError
@@ -131,6 +141,11 @@ class ToolRegistry:
     def __init__(self) -> None:
         self._tools: dict[str, Tool] = {}
         self._consecutive_parse_failures = 0
+        self._approval: ApprovalPipeline | None = None
+
+    def set_approval_pipeline(self, pipeline: ApprovalPipeline) -> None:
+        """注入审批管线（由 CLI 组装）；无注入时权限检查由工具内审批回调兜底。"""
+        self._approval = pipeline
 
     def register(self, tool: Tool) -> None:
         self._tools[tool.name] = tool
@@ -161,7 +176,7 @@ class ToolRegistry:
         self._consecutive_parse_failures = 0
 
     async def dispatch(self, call: ToolCall, mode: str) -> ToolResult:
-        """执行一次工具调用：模式校验 → 解析 → 校验 → 执行 → 记账。
+        """执行一次工具调用：模式校验 → 权限管线 → 解析 → 校验 → 执行 → 记账。
 
         :param mode: 会话模式快照（必填——漏传即接口错误，绝不静默放行）
         :raises ParseCircuitBroken: 连续第 3 次解析失败（JSON 非法/校验失败）时抛出
@@ -189,6 +204,9 @@ class ToolRegistry:
                 hint = f"当前为 Build 模式，工具 {call.name} 不可用。方案已确认，请直接继续执行任务。"
             return self._failure(call, hint)
 
+        # 权限管线（Day3 执行层：沙箱/分类已在工具内产生 ApprovalAction，由工具的风险
+        # 声明与参数共同决定是否触发审批；bash 需在工具内先分类再走审批）。
+        # 注意：审批拦截返回 ok=False，不计入解析失败熔断计数（用户拒绝是控制信号）
         try:
             args = json.loads(call.arguments) if call.arguments.strip() else {}
         except json.JSONDecodeError as exc:
@@ -200,6 +218,34 @@ class ToolRegistry:
         if errors:
             detail = "；".join(errors)
             return self._parse_failure(call, f"参数校验失败：{detail}")
+
+        # 权限管线（Day3 执行层）：工具可基于参数构造审批动作（写/命令），
+        # 有审批管线则过 gate；审批拦截返回 ok=False 回喂，不计入熔断计数
+        if self._approval is not None:
+            approval_action = tool.build_approval(args, mode)
+            if approval_action is not None:
+                # Plan 模式语义（概设 §5.1「Plan 只读探索」）：
+                # - bash_command 非 SAFE：一律拦截（Plan 下 bash 白名单只放行 SAFE，
+                #   概设 §5.1/任务 1.5；区外读请改用 read_file 工具，它走 file_read 审批）
+                # - file_write：拦截（Plan 下不可写）
+                # - file_read（read_file/list_dir/grep 区外读）：走 gate 单独审批
+                #   （FR-13 区外读写任何模式都需单独审批）
+                if mode == MODE_PLAN and approval_action.kind != "file_read":
+                    self._consecutive_parse_failures = 0
+                    self._approval.record_denial(
+                        approval_action,
+                        f"Plan 模式禁止该操作：{approval_action.target}",
+                    )
+                    return self._failure(
+                        call,
+                        f"当前处于 Plan 模式，该操作会修改状态：{approval_action.target}。"
+                        "请先产出方案并调用 submit_plan，经用户确认进入 Build 模式后执行。",
+                    )
+                verdict = self._approval.gate(approval_action)
+                if not verdict.allowed:
+                    # 用户拒绝/守卫拦截：控制信号，清零熔断计数避免误熔断
+                    self._consecutive_parse_failures = 0
+                    return self._failure(call, verdict.message)
 
         try:
             result = await tool.execute(**args)

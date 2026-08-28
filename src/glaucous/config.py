@@ -1,22 +1,18 @@
 """运行配置：从环境变量加载 LLM 档案与全局配置。
 
-Day 1 采用环境变量单模型方案（models.toml 注册表是 M3.4 任务，
-环境变量兜底也是开发计划表风险预案的裁剪方向）。
-
 环境变量约定（概设 §9）：
-- GLAUCOUS_BASE_URL      OpenAI 兼容网关地址，默认 https://api.deepseek.com/v1
-- GLAUCOUS_API_KEY       API 密钥，缺失时启动即报错退出（凭据只经环境变量提供，绝不入库）
-- GLAUCOUS_MODEL         模型名，默认 deepseek-v4-flash
-- GLAUCOUS_TEMPERATURE   采样温度，默认 0.2
-
-M3.4 迁移说明：models.toml 注册表落地后由注册表接管模型路由，
-GLAUCOUS_DEFAULT_MODEL 作为注册表的默认档案选择项与本模块的单模型环境变量形成映射。
+- GLAUCOUS_BASE_URL            OpenAI 兼容网关地址，默认 https://api.deepseek.com/v1
+- GLAUCOUS_API_KEY             API 密钥，缺失时启动即报错退出（凭据只经环境变量提供，绝不入库）
+- GLAUCOUS_MODEL               模型名，默认 deepseek-v4-flash
+- GLAUCOUS_TEMPERATURE         采样温度，默认 0.2
+- GLAUCOUS_READONLY_EXTRA      区外只读白名单路径（冒号/分号分隔），环境探测免审批（概设 §5.4）
 """
 
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from pathlib import Path
 
 DEFAULT_BASE_URL = "https://api.deepseek.com/v1"
 DEFAULT_MODEL = "deepseek-v4-flash"
@@ -32,7 +28,7 @@ class ConfigError(RuntimeError):
 
 @dataclass(frozen=True)
 class LLMProfile:
-    """单个 LLM 档案。Day 1 仅一个档案；M3.4 扩展为多档案注册表。"""
+    """单个 LLM 档案。M3.4 扩展为多档案注册表。"""
 
     base_url: str
     api_key: str
@@ -46,6 +42,7 @@ class Config:
 
     profile: LLMProfile
     max_steps: int
+    read_only_extra: tuple[Path, ...] = field(default_factory=tuple)
 
 
 def load_profile(env: dict[str, str] | None = None) -> LLMProfile:
@@ -90,4 +87,17 @@ def load_config(env: dict[str, str] | None = None) -> Config:
     raw_steps = source.get("GLAUCOUS_MAX_STEPS", "").strip()
     if raw_steps.isdigit() and int(raw_steps) > 0:
         max_steps = int(raw_steps)
-    return Config(profile=profile, max_steps=max_steps)
+    return Config(profile=profile, max_steps=max_steps, read_only_extra=_load_read_only_extra(source))
+
+
+def _load_read_only_extra(source: dict[str, str]) -> tuple[Path, ...]:
+    """解析区外只读白名单（GLAUCOUS_READONLY_EXTRA，冒号/分号分隔）；非法项忽略。"""
+    raw = source.get("GLAUCOUS_READONLY_EXTRA", "").strip()
+    if not raw:
+        return ()
+    paths = []
+    for part in raw.replace(";", ":").split(":"):
+        part = part.strip()
+        if part:
+            paths.append(Path(part))
+    return tuple(paths)
