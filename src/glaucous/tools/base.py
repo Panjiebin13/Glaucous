@@ -1,14 +1,17 @@
 """工具基座：Tool 协议、ToolResult、ToolRegistry 与轻量 schema 校验。
 
-设计要点（概设 §5.6/§4.3）：
-- Tool 协议 = name + description + JSON Schema parameters + async execute；
-- schema 校验自研轻量子集（type/required/enum/properties/minimum），
+设计要点（概设 §5.6/§5.1/§4.3）：
+- Tool 协议 = name + description + JSON Schema parameters + modes + async execute；
+- 双层权限（概设 §5.1）：声明层 tool_schemas(mode) 按 Plan/Build 过滤工具定义，
+  执行层 dispatch(call, mode) 对幻觉调用兜底拦截——模型从源头看不到写工具，
+  即便幻觉调用也会被回喂引导而非执行；
+- schema 校验自研轻量子集（type/required/enum/properties/minimum 子集），
   不引入 jsonschema 依赖——保持「工具定义与本地执行自研」的约束边界；
-- dispatch 是统一错误收口：工具不存在/JSON 非法/校验失败/执行异常
-  四类错误全部转为 ok=False 的 ToolResult 回喂，模型自行修正；
+- dispatch 是统一错误收口：模式越权/工具不存在/JSON 非法/校验失败/执行异常
+  五类错误全部转为 ok=False 的 ToolResult 回喂，模型自行修正；
 - 解析失败熔断：全局连续解析失败计数（成功或非解析类错误清零），
   连续第 3 次抛 ParseCircuitBroken——模型修正重发携带新 call_id，
-  故不能按 call_id 计数（Plan §4.1）；
+  故不能按 call_id 计数（Day1 Plan §4.1）；
 - ToolResult.metadata 在执行时顺手记账，为 M2 的 L1 裁剪派生摘要
   预埋零成本数据源（概设 §4.2「执行时记账，裁剪时派生」）。
 """
@@ -21,6 +24,11 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..llm.client import ToolCall
+
+# 会话模式常量（与 agent.state.SessionState 共用字面量，避免跨层 import）
+MODE_PLAN = "plan"
+MODE_BUILD = "build"
+ALL_MODES = frozenset({MODE_PLAN, MODE_BUILD})
 
 
 class ParseCircuitBroken(RuntimeError):
@@ -43,15 +51,18 @@ class ToolResult:
 
 
 class Tool:
-    """工具协议：子类实现 name/description/parameters 与 execute。
+    """工具协议：子类实现 name/description/parameters/modes 与 execute。
 
     parameters 为 JSON Schema dict（type/required/enum/properties/minimum 子集），
     注册表据此生成 OpenAI tools 声明并在 dispatch 时做参数校验。
+    modes 声明工具在哪些会话模式可见（声明层过滤 + 执行层校验，概设 §5.1）：
+    默认两模式均可用；写工具仅 build；submit_plan 仅 plan。
     """
 
     name: str = ""
     description: str = ""
     parameters: dict[str, Any] = {}
+    modes: frozenset[str] = ALL_MODES
 
     async def execute(self, **kwargs: Any) -> ToolResult:
         raise NotImplementedError
@@ -107,7 +118,11 @@ def validate_arguments(schema: dict[str, Any], args: dict[str, Any]) -> list[str
 class ToolRegistry:
     """工具注册表：声明层（tool_schemas）与执行层（dispatch）的统一入口。
 
-    Plan 模式的「声明层隐藏写工具」（M1 任务）将在本类的 expose 能力上扩展。
+    双层权限（概设 §5.1）：
+    - 声明层：tool_schemas(mode) 只向 API 声明当前模式可见的工具——
+      Plan 模式下写工具根本不出现在 tools 参数里，模型从源头无法调用；
+    - 执行层：dispatch(call, mode) 校验工具属于当前模式——即便模型幻觉
+      调用（引用历史消息中的工具名）也回喂引导文案而非执行。
     """
 
     # 解析失败熔断阈值：前 2 次回喂修正，连续第 3 次熔断（概设 §4.3「最多 2 轮」）
@@ -120,8 +135,12 @@ class ToolRegistry:
     def register(self, tool: Tool) -> None:
         self._tools[tool.name] = tool
 
-    def tool_schemas(self) -> list[dict[str, Any]]:
-        """生成 OpenAI tools 声明（声明层：发给 API 的工具定义）。"""
+    def tool_schemas(self, mode: str | None = None) -> list[dict[str, Any]]:
+        """生成 OpenAI tools 声明（声明层：发给 API 的工具定义）。
+
+        :param mode: 会话模式快照；None 表示不过滤（全量，仅供测试/调试，
+            生产路径 loop 必须传具体模式）
+        """
         return [
             {
                 "type": "function",
@@ -132,17 +151,19 @@ class ToolRegistry:
                 },
             }
             for tool in self._tools.values()
+            if mode is None or mode in tool.modes
         ]
 
     def reset_parse_counter(self) -> None:
         """重置解析失败计数。主循环在每次 run() 入口调用——
-        熔断语义限定在单任务内，避免上一任务尾部残留导致误熔断（Plan §4.1）。
+        熔断语义限定在单任务内，避免上一任务尾部残留导致误熔断（Day1 Plan §4.1）。
         """
         self._consecutive_parse_failures = 0
 
-    async def dispatch(self, call: ToolCall) -> ToolResult:
-        """执行一次工具调用：解析 → 校验 → 执行 → 记账，四类错误统一回喂。
+    async def dispatch(self, call: ToolCall, mode: str) -> ToolResult:
+        """执行一次工具调用：模式校验 → 解析 → 校验 → 执行 → 记账。
 
+        :param mode: 会话模式快照（必填——漏传即接口错误，绝不静默放行）
         :raises ParseCircuitBroken: 连续第 3 次解析失败（JSON 非法/校验失败）时抛出
         """
         started = time.perf_counter()
@@ -150,10 +171,23 @@ class ToolRegistry:
 
         if tool is None:
             # 幻觉工具：回喂可用工具列表，模型自行改道（概设 §4.3）；
-            # 非解析类错误打断「连续」语义，计数清零（Plan §4.1）
+            # 非解析类错误打断「连续」语义，计数清零（Day1 Plan §4.1）
             self._consecutive_parse_failures = 0
             available = "、".join(sorted(self._tools))
             return self._failure(call, f"工具 {call.name} 不存在。可用工具：{available}")
+
+        if mode not in tool.modes:
+            # 执行层模式校验：声明层隐藏的正常兜底（模型引用了历史中见过的工具名）。
+            # 拦截文案按方向区分，引导模型走正确路径而非原样重试（概设 §4.3）
+            self._consecutive_parse_failures = 0
+            if tool.modes == frozenset({MODE_BUILD}):
+                hint = (
+                    f"当前为 Plan 模式，工具 {call.name} 不可用（只读探索阶段）。"
+                    "请先产出完整方案并调用 submit_plan 请求用户确认，确认后进入 Build 模式即可使用写工具。"
+                )
+            else:
+                hint = f"当前为 Build 模式，工具 {call.name} 不可用。方案已确认，请直接继续执行任务。"
+            return self._failure(call, hint)
 
         try:
             args = json.loads(call.arguments) if call.arguments.strip() else {}

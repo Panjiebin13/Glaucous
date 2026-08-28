@@ -1,15 +1,24 @@
-"""Agent 主循环 v0：请求 → tool_calls → 执行 → 回喂 → 终止。
+"""Agent 主循环：请求 → tool_calls → 执行 → 回喂 → 终止（Day 2 叠加双模式）。
 
 主循环骨架（概设 §4.1）：
-    push_user → 循环 { 守卫检查 → LLM 请求 → 无 tool_calls 即自然终止
-                        → push_assistant → 逐个 dispatch → push_tool }
+    push_user → 循环 { 守卫检查 → mode 快照 → LLM 请求（tool_schemas(mode)）
+                        → 无 tool_calls 即自然终止
+                        → push_assistant → 逐个 dispatch(call, mode) → push_tool }
 
-Day 1 终止条件（Plan §4.4）：
-①自然终止（无 tool_calls，正常完成）
+终止条件（Day 2 沿用 Day 1 三类）：
+①自然终止（无 tool_calls，正常完成）——Build 模式下触发模式回归（概设 §5.1）
 ②步数上限（默认 50，防死循环硬熔断）
 ③解析失败熔断（ParseCircuitBroken 异常终止：loop 捕获后为悬空
   call_id 补推 ok=False 的 ToolMessage 保证 History 序列合法，
   再返回诊断文本——否则 REPL 后续请求会因 tool_call_id 悬空被 API 400 拒绝）
+
+mode 快照语义（Day2 Plan §4.5）：每次 LLM 请求前取 state.mode 快照，
+本轮声明层与执行层都用快照——submit_plan 轮中切换后，同轮后续幻觉的
+写调用仍按 Plan 快照拦截回喂，下一轮起 Build 声明生效，消除
+「声明层与执行层同轮不一致」的窗口。
+
+mode_changed 统一出口：每轮 LLM 响应处理结束后（含自然终止分支）比对
+state.mode 与快照，不一致即 emit——覆盖 submit_plan 切换与自然终止回归两条路径。
 
 守卫检查点固定在「每次请求 LLM 之前」，保证无论循环从哪条路径
 回来都会重新评估终止条件（概设 §4.1）。
@@ -21,33 +30,37 @@ from typing import Any, Callable
 
 from ..context.history import History, ToolMessage
 from ..llm.client import LLMClient
-from ..tools.base import ParseCircuitBroken, ToolRegistry
+from ..tools.base import MODE_BUILD, ParseCircuitBroken, ToolRegistry
+from .state import SessionState
 
-# loop → CLI 的事件契约（Plan §4.4）：Day 1 纯文本渲染，M3 升级 rich 主题
+# loop → CLI 的事件契约（Day2 Plan §4.5）：Day 1 纯文本渲染，M3 升级 rich 主题
 # 事件类型：text（流式正文）/ tool_start / tool_end / diagnostic（终止诊断，必达）
+#          / mode_changed（模式切换或回归，payload: mode/policy/reason）
 LoopEvent = Callable[[str, dict[str, Any]], None]
 
 
 class AgentLoop:
-    """单会话主循环。CLI 与 loop 共享同一 History 实例，跨轮次累积。"""
+    """单会话主循环。CLI 与 loop 共享同一 History/SessionState 实例，跨轮次累积。"""
 
     def __init__(
         self,
         llm: LLMClient,
         registry: ToolRegistry,
         history: History,
+        state: SessionState,
         max_steps: int = 50,
         on_event: LoopEvent | None = None,
     ):
         self._llm = llm
         self._registry = registry
         self._history = history
+        self._state = state
         self._max_steps = max_steps
         self._on_event = on_event
 
     async def run(self, task: str) -> str:
         """执行一轮用户任务，返回最终文本（自然终答 / 终止诊断）。"""
-        self._registry.reset_parse_counter()  # 熔断语义限定在单任务内（Plan §4.1）
+        self._registry.reset_parse_counter()  # 熔断语义限定在单任务内（Day1 Plan §4.1）
         self._history.push_user(task)
         steps = 0
         while True:
@@ -59,15 +72,30 @@ class AgentLoop:
                 )
             steps += 1
 
+            # mode 快照：本轮声明层与执行层保持一致（Day2 Plan §4.5）
+            mode_snapshot = self._state.mode
+
             msg = await self._llm.chat(
                 self._history.view(),
-                tools=self._registry.tool_schemas(),
+                tools=self._registry.tool_schemas(mode_snapshot),
                 on_text=self._emit_text,
             )
 
             if not msg.tool_calls:
                 # ① 自然终止：终答入史（REPL 多轮语义：下一轮能看到本轮结论）
                 self._history.push_assistant(msg)
+                # Build 自然终止 = 任务完成 → 回归 Plan（概设 §5.1）。
+                # 异常终止路径（②③）不在此分支，不触发回归——异常 ≠ 完成
+                if mode_snapshot == MODE_BUILD:
+                    self._state.return_to_plan()
+                    self._emit(
+                        "mode_changed",
+                        {
+                            "mode": self._state.mode,
+                            "policy": self._state.approval_policy,
+                            "reason": "任务完成，已回归 Plan 模式",
+                        },
+                    )
                 return msg.text or ""
 
             # assistant(tool_calls) 先入史：tool 消息配对的前提（OpenAI 协议硬约束）
@@ -78,22 +106,34 @@ class AgentLoop:
             try:
                 for call in msg.tool_calls:
                     self._emit("tool_start", {"call": call})
-                    result = await self._registry.dispatch(call)
+                    result = await self._registry.dispatch(call, mode_snapshot)
                     dispatched.add(call.id)
                     self._history.push_tool(call, result)
                     self._emit("tool_end", {"call": call, "result": result})
             except ParseCircuitBroken as exc:
                 # ③ 解析失败熔断：为悬空 call_id 补推 ok=False 结果，
-                # 保证 History 序列合法后再终止（Plan §4.1 善后策略）
+                # 保证 History 序列合法后再终止（Day1 Plan §4.1 善后策略）
                 self._salvage_dangling_calls(msg, dispatched, f"解析熔断终止，该调用未执行：{exc}")
                 return self._terminate(f"任务终止：{exc}")
-            except BaseException as exc:  # noqa: BLE001 —— 含 KeyboardInterrupt 等
+            except BaseException as exc:  # noqa: BLE001 —— 含 KeyboardInterrupt/CancelledError
                 # 任何异常路径都不允许留下悬空 tool_call_id：一旦入史，
                 # 共享 History 的后续每轮请求都会被 API 400 拒绝，会话静默报废。
                 # 先善后（补推 ok=False 结果）再向上抛出，交由 REPL 决定中断语义。
                 reason = type(exc).__name__ if not str(exc) else str(exc)
                 self._salvage_dangling_calls(msg, dispatched, f"本轮中断，该调用未执行：{reason}")
                 raise
+
+            # submit_plan 三选一①②在 dispatch 内改 state——比对快照统一 emit
+            # mode_changed（Day2 Plan §4.5 统一出口，自然终止回归在上方分支 emit）
+            if self._state.mode != mode_snapshot:
+                self._emit(
+                    "mode_changed",
+                    {
+                        "mode": self._state.mode,
+                        "policy": self._state.approval_policy,
+                        "reason": f"用户确认方案，已切换 {self._state.mode} 模式",
+                    },
+                )
 
     def _terminate(self, diagnostic: str) -> str:
         """终止路径的统一交付：诊断文本经事件通道显式通知（不依赖返回值推断）。
