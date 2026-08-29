@@ -88,6 +88,14 @@
 - [ ] r2-S1 theme.py VT 启用借 os.system("") 隐式依赖 cmd.exe，后续可改 ctypes.SetConsoleMode 显式置位并包裹异常（健壮性增强）
 - [ ] r2-S2 VT 启用行为未同步入 spec §4.1 字面，后续修订补述；M4 偿还 test_theme_render 时增加 win32 TTY 分支的 mock 断言
 
+#### 合并评审建议项（r3，见 docs/reviews/202608311000-plan-m3-day5-experience-extensions-code-review-r3-20260829-1700.md；B1/B2 已修复关闭，r4 聚焦复审通过）
+
+- [ ] r3-S1 /help 与 PT 补全未收录 /view：HELP_LINES / SLASH_COMMANDS 增补（commands.py + cli.py）
+- [ ] r3-S2 /exit 双路径死代码与告别文案分叉：清理 commands._cmd_exit 死分支或恢复 🌅 文案并同步 spec §4.3
+- [ ] r3-S3 rich 依赖上限丢失：恢复 rich>=13.7,<14 或修订 spec §4.7 并登记
+- [ ] r3-S5 Banner 无模型名/模式占位（r1 S7 合并后偏离扩大）：Banner 第三行接 ctx.current_model 与模式段，M4 视觉验收处理
+- [ ] r3-S4 M3-UI 已登记修复项现状未变（B-01/S-01/S-02）：并入上方 3.2r 待办随 M4 偿还
+
 ### Day 5 / M3 CLI 主题渲染（8/31）
 
 - [x] 3.1 theme.py 色板 + rich Theme 接入（cli.py 全量 console.print/console.input 化：色板单一出口、动态内容统一 escape、流式正文逐字保真、手写 ANSI 门控 `_ANSI`/`import os` 清除）（FR-30）
