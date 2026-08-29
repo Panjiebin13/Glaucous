@@ -251,7 +251,7 @@ def make_ask_callback(ctx: ReplContext):
             for i, option in enumerate(options, 1):
                 table.add_row(f"[glaucous.title][{i}] {escape(option)}[/]")
             console.print(table)
-            if options and _arrow_mode():
+            if len(options) >= 2 and _arrow_mode():
                 idx = select_with_arrows("请选择：", options)
                 result = options[idx] if idx is not None else None
             else:
@@ -526,6 +526,13 @@ def render_event(event: str, payload: dict[str, Any], state: SessionState) -> No
         else:
             text, style = "🌊 潮水不退，继续精简对话", "glaucous.warn"
         console.print(f"[{style}]  {text}[/]")
+    elif event == "budget":
+        # 预算评估（与输入区头部圆环同源：theme.ctx_ring 三档变色）
+        ring, level_style = ctx_ring(payload.get("percent", 0.0))
+        console.print(
+            f"[{level_style}]  {ring} ctx 占用 {payload.get('percent', 0)}%"
+            f"（{payload.get('used', '?')}/{payload.get('limit', '?')} tokens）[/]"
+        )
     elif event == "tool_start":
         call = payload["call"]
         brief = call.arguments if len(call.arguments) <= 80 else call.arguments[:80] + "…"
@@ -563,7 +570,9 @@ def _thinking_line(event: str, payload: dict[str, Any]) -> str:
     if event == "compressed":
         if payload.get("stage") == "L1":
             return "🌊 涨潮了，归档早期对话"
-        return "🌊 涨潮了，压缩上下文" if payload.get("ok") else "🌊 潮水不退，继续精简对话"
+        return "🌊 涨潮了，压缩上下文" if payload.get("ok") else "🌊 潮水仍不回，继续精简对话"
+    if event == "budget":
+        return f"◔ ctx 占用 {payload.get('percent', 0)}%（{payload.get('used', '?')}/{payload.get('limit', '?')} tokens）"
     if event == "tool_start":
         call = payload["call"]
         return f"⏺ {call.name} {_tool_brief(call.arguments)}"
