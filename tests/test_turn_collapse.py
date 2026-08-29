@@ -165,3 +165,23 @@ class TestUsageAccumulationGate:
         no_cache = cli._usage_line({"prompt": 100, "completion": 20, "cache_hit": None, "cache_miss": None})
         assert no_cache == "⏱ ↑100 ↓20 tokens"
         assert cli._usage_line({"prompt": 0, "completion": 0, "cache_hit": None, "cache_miss": None}) is None
+
+
+class TestBudgetThinkingLine:
+    """budget 思考区摘要行防回退（r2-B1/r3-S1）：percent 为 0~1 比例，文案须 ×100；
+    圆环字符经 ctx_ring 动态取形（与 render_event 同源），不得硬编码。"""
+
+    def test_percent_rendered_as_percentage(self) -> None:
+        payload = {"used": 54000, "limit": 128000, "percent": 0.4219, "level": "low"}
+        line = cli._thinking_line("budget", payload)
+        assert "42%" in line and "54000/128000" in line
+        assert "0.4219%" not in line  # 防比例直拼回退（差 100 倍缺陷）
+        assert line.startswith("◑")  # 42% 四分位 → ◑（ctx_ring 取形，非硬编码 ◔）
+
+    def test_ring_glyph_follows_ratio(self) -> None:
+        assert cli._thinking_line("budget", {"percent": 0.10}).startswith("○")
+        assert cli._thinking_line("budget", {"percent": 0.9375}).startswith("●")
+
+    def test_empty_payload_no_raise(self) -> None:
+        line = cli._thinking_line("budget", {})
+        assert "0%" in line  # 缺省 0.0 兜底不抛错
