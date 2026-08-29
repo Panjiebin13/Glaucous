@@ -5,8 +5,9 @@
 （system 在 JSONL 不落盘但内存 view() 每次引用），且行为约束由声明层
 （tool_schemas 过滤）+ 执行层（dispatch 校验）硬保证，提示词只做引导。
 
-注入段顺序（Day4 Plan §4.9，概设 §4.2）：基础准则 → 工作区 → glaucous.md 规则
-（全量永不裁剪，FR-20）→ 事实记忆（Top-N，FR-21），空段省略。规则与记忆文本由
+注入段顺序（Day4 Plan §4.9，概设 §4.2；Day5 尾部延伸技能索引段）：基础准则 →
+工作区 → glaucous.md 规则（全量永不裁剪，FR-20）→ 事实记忆（Top-N，FR-21）→
+技能索引（name+description，惰性加载，FR-28），空段省略。规则与记忆文本由
 extensions/rules.py 与 extensions/memory.py 现读现传（每次启动现读，FR-20
 「每次会话自动生效」），本模块只负责拼装，不感知文件系统。
 """
@@ -43,19 +44,26 @@ edit_file 精确修改（先 read 后 edit，old 文本保持唯一匹配）。�
 - 提问必须具体可答：说明缺什么、已尝试什么，并附候选选项（如解释器路径候选）。
 - 用户的回答若包含环境事实（解释器路径、构建命令等），应调用 memory_save 沉淀到
   对应作用域（项目事实存 project，跨项目通用存 global），下次不再重复询问（FR-19）。
+
+技能使用：
+- 若任务与「技能索引」中某项描述相关，应先调用 load_skill 加载该技能的详细步骤，
+  再按步骤行动；一次任务通常只需加载一个最相关的技能（FR-28）。
 """
 
 
-def build_system_prompt(workspace: Path, rules: str = "", memory: str = "") -> str:
-    """组装 system prompt：基础准则 + 双模式引导 + 工作区信息 + 规则/记忆注入段。
+def build_system_prompt(workspace: Path, rules: str = "", memory: str = "", skills: str = "") -> str:
+    """组装 system prompt：基础准则 + 双模式引导 + 工作区 + 规则/记忆/技能索引段。
 
     :param rules: glaucous.md 双层规则全文（load_rules 产物，全量不裁剪，FR-20）
     :param memory: 事实记忆注入文本（MemoryStore.load_injection 产物，FR-21）
-    空段省略；默认参数保持旧签名（workspace 单参）调用兼容。
+    :param skills: 技能索引文本（SkillRegistry.index_text 产物，惰性加载，FR-28）
+    空段省略；默认参数保持旧签名调用兼容。
     """
     sections = [BASE_PROMPT, f"当前工作区：{workspace.resolve()}"]
     if rules:
         sections.append(f"项目与全局规则（glaucous.md，必须遵守）：\n{rules}")
     if memory:
         sections.append(f"已知事实记忆（环境事实，跨会话沉淀）：\n{memory}")
+    if skills:
+        sections.append(f"技能索引（任务相关时先调用 load_skill 获取详细步骤）：\n{skills}")
     return "\n\n".join(sections) + "\n"

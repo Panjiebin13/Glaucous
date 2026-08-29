@@ -53,13 +53,33 @@ class LLMClient:
     """OpenAI 兼容客户端（仅 HTTP 通道职责）。
 
     重试语义（概设 §4.4）：可重试错误指数退避 + 随机抖动，最多 4 次重试；
-    4xx 属于请求本身的问题（鉴权/参数），重试无意义，直接抛出。
+    4xx 属于请求本身的问题（鉴权/参数错），重试无意义，直接抛出。
+    on_retry 钩子（Day5 Plan §4.2）：退避入睡前通知（第 N 次, 预计等待秒），
+    默认 None 兼容既有构造；只做展示通知，不参与重试决策（纯传输职责不变）。
     """
 
     MAX_RETRIES = 4
     BASE_DELAY = 1.0
 
-    def __init__(self, profile: LLMProfile):
+    def __init__(
+        self,
+        profile: LLMProfile,
+        on_retry: Callable[[int, float], None] | None = None,
+    ):
+        self._profile = profile
+        self._on_retry = on_retry
+        self._client = AsyncOpenAI(
+            api_key=profile.api_key,
+            base_url=profile.base_url,
+            timeout=REQUEST_TIMEOUT,
+        )
+
+    def switch_profile(self, profile: LLMProfile) -> None:
+        """运行时切换模型档案（任务 3.4，概设 §6.2，FR-27）。
+
+        替换 _profile 并重建 AsyncOpenAI 客户端；历史消息为 OpenAI 通用结构，
+        切换只改后续请求路由，会话历史无缝延续；on_retry 钩子保留。
+        """
         self._profile = profile
         self._client = AsyncOpenAI(
             api_key=profile.api_key,
@@ -92,8 +112,10 @@ class LLMClient:
                 if attempt == self.MAX_RETRIES:
                     break
                 # 指数退避 + 抖动：1s/2s/4s/8s 基数上叠加 0~1s 随机量，
-                # 避免并发场景下同步重试形成请求风暴
+                # 避免并发场景下同步重试形成请求风暴；入睡前通知展示层（「↻ 重试中」）
                 delay = self.BASE_DELAY * (2**attempt) + random.uniform(0, 1)
+                if self._on_retry is not None:
+                    self._on_retry(attempt + 1, delay)
                 await asyncio.sleep(delay)
         raise LLMError(f"LLM 请求失败（已重试 {self.MAX_RETRIES} 次）：{last_error}") from last_error
 

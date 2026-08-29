@@ -58,3 +58,29 @@
 
 > 2.1~2.7 代码已按 SDD 流程（spec Review 2 轮阻塞归零 + Code Review 待进行）完成编码；
 > 上下文压缩管线（L1/L2/锚替换/预算终止）为纯内存变换，会话 JSONL 保留全量原文（resume 后重新裁剪）。
+
+### Day 5 / M3 体验与扩展（8/31）
+
+- [x] 3.1 theme.py 色板 + rich Theme 接入 + 终端降级（FR-30）
+- [x] 3.2 渲染规范：⏺/⎿ 工具行、四类卡片、状态栏、Banner、意象图标（FR-30）
+- [x] 3.3 prompt_toolkit 输入层 + 斜杠命令全集（FR-31）
+- [x] 3.4 models.toml 注册表 + /model 切换 + 连通性校验（FR-26/27）
+- [x] 3.5 skill 扫描 + 索引注入 + load_skill 惰性加载 + 2 个内置示例（FR-28）
+- [x] 3.6 /init 生成 glaucous.md 草稿（FR-23）
+- [x] 3.7 终端降级（truecolor/256/16 色）
+- [x] 3.8 基线回归：既有 65 用例全绿（64 passed, 1 skipped）+ 斜杠命令全链路冒烟通过；M3 验收（界面视觉规范/多模型接力）留待用户 WSL 环境自行验证
+- [ ] 测试债务：M3 新增模块单测（test_model_registry / test_skill_lazyload / test_theme_render / test_repl_commands）由 M4 偿还；「注册时连通性校验」偏移为切换时校验（概设 §6.1，若后续落地 /model add 向导应补注册时 ping，spec 评审 S1）
+
+#### 代码评审建议项（r1，见 docs/reviews/202608290030-m3-day5-code-review-r1.md）
+
+- [ ] S2 状态栏 bottom_toolbar 为纯文本：无占用条三档变色与档位附注、Build 徽标未附策略（prompt_toolkit 侧样式需另行接线）
+- [ ] S4 pyproject package-data 用 assets/skills/*/SKILL.md，改 ** 防嵌套目录时 wheel 漏装（当前单层等价）
+- [ ] S5 /init README 识别仅枚举 3 个固定文件名，未覆盖 spec 的 README* 通配
+- [ ] S6 init_draft.scan_workspace 相对路径在 Windows 下分隔符混杂，建议统一 POSIX 风格
+- [ ] S7 Banner 缺「模式占位」（仅显示模型名，spec §4.2 字面要求模型名与模式占位）
+- [x] S1/S3/S8 现状确认（r2 说明）：S1 load_config 抛 RegistryError 由 cli 双捕获，行为等价；S3 budget critical 维持三档状态行形态（升警示卡会与状态行重复，登记本项待 M4 视觉验收时再定）；S8 ReplContext loop/pipeline 可空与 stream_state 字段为构造顺序必需的等价实现（r2 已接受）
+
+#### 代码评审建议项（r2，见 docs/reviews/202608290021-m3-day5-code-review-r2.md）
+
+- [ ] r2-S1 theme.py VT 启用借 os.system("") 隐式依赖 cmd.exe，后续可改 ctypes.SetConsoleMode 显式置位并包裹异常（健壮性增强）
+- [ ] r2-S2 VT 启用行为未同步入 spec §4.1 字面，后续修订补述；M4 偿还 test_theme_render 时增加 win32 TTY 分支的 mock 断言

@@ -14,6 +14,9 @@ dependencies = [
     # 只把 openai SDK 当 HTTP 通道使用（需求文档约束 3）；
     # 重试/退避/流式 tool-call 拼装/解析容错均自研（概设 §3）
     "openai>=1.40,<2",
+    # 终端 UI（概设 §3 技术选型：rich 渲染 + prompt_toolkit 输入，M3 落地）
+    "rich>=13,<14",
+    "prompt_toolkit>=3,<4",
 ]
 
 [project.optional-dependencies]
@@ -27,6 +30,10 @@ glaucous = "glaucous.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+# 内置示例 skill（M3 任务 3.5，随包分发；Day5 Plan §4.5）
+"glaucous" = ["assets/skills/*/SKILL.md"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

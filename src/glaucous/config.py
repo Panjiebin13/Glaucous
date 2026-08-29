@@ -90,8 +90,16 @@ def _load_temperature(source: dict[str, str]) -> float:
 
 
 def load_config(env: dict[str, str] | None = None) -> Config:
-    """加载完整全局配置。"""
-    profile = load_profile(env)
+    """加载完整全局配置。
+
+    Day5（任务 3.4）：默认档案解析委托 llm/registry——models.toml 存在时取默认档案，
+    缺失时回落环境变量单档案（语义与 load_profile 一致）；load_profile 保留供测试兼容。
+    """
+    # 延迟导入：registry 顶层引用本模块常量，顶层互引会成环（单向依赖维持 config → registry）
+    from .llm.registry import load_registry, resolve_profile
+
+    entries, default = load_registry(env)
+    profile = resolve_profile(entries[default], env)
     source = os.environ if env is None else env
     max_steps = DEFAULT_MAX_STEPS
     raw_steps = source.get("GLAUCOUS_MAX_STEPS", "").strip()
