@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import json
 import os
 import sys
 from pathlib import Path
@@ -27,7 +26,7 @@ from typing import Any, Callable
 
 from .agent.loop import AgentLoop
 from .agent.state import POLICY_AUTO_APPROVE, POLICY_PER_ACTION, SessionState
-from .commands import COMMAND_META, ReplContext, handle_command, reset_turn_buffers
+from .commands import COMMAND_META, ReplContext, handle_command, begin_turn
 from .config import ConfigError, load_config
 from .context.budget import BudgetReport, build_report
 from .context.history import History
@@ -104,18 +103,22 @@ MD_RENDER_MAX_LINES = 200
 # resume 时回放的最近消息条数（仅 UI 摘要，History 本身全量加载）
 RESUME_PREVIEW_MESSAGES = 6
 
-# prompt_toolkit 补全的斜杠命令全集（16 个：既有 14 + /view、/expand，v1.1 R2）
+# prompt_toolkit 补全的斜杠命令全集（17 个：既有 16 + /skill，v1.1 反馈 F3）
 SLASH_COMMANDS = [
     "/help", "/plan", "/build", "/compact", "/clear", "/resume", "/model",
-    "/memory", "/rules", "/skills", "/init", "/stop", "/exit", "/quit",
-    "/view", "/expand",
+    "/memory", "/rules", "/skills", "/skill", "/init", "/stop", "/exit",
+    "/quit", "/view", "/expand",
 ]
 
-# 需文件路径参数的命令（补全器据此在工作区内补全路径，v1.1 R2）
-PATH_ARG_COMMANDS = {"/view"}
+# 参数段补全注册表（v1.1 反馈 F1，取代 PATH_ARG_COMMANDS 超集）：
+# /view → 工作区路径补全；/model → 模型名前缀过滤（候选经 model_names 动态取）
+ARG_COMPLETIONS = {"/view": "path", "/model": "model"}
 
 # 思考区动态区高度上限（行），滚动显示最近事件（v1.1 R3）
 THINKING_MAX_LINES = 8
+
+# 动态区正文尾行单行宽度上限（F4 §4.2：长段落折行单行，防止窗口被单行淹没）
+THINKING_LINE_WIDTH = 120
 
 
 def _fmt_tokens(n: int) -> str:
@@ -147,6 +150,21 @@ def _usage_token_brief(usage: dict[str, Any]) -> str:
     if not prompt and not completion:
         return ""
     return f" · ↑{_fmt_tokens(prompt)} ↓{_fmt_tokens(completion)} tokens"
+
+
+def flush_text_segment(ctx: ReplContext) -> None:
+    """当前段正文缓冲落账（v1.1 反馈 F4 §4.2）：非空 → 会话缓冲记为正文段条目；
+
+    空段仅清空不落账不计数（S3 口径）。触发点仅两处：①tool_start 到达（中间步
+    正文随首个工具调用落账；loop 自然终止序列的 budget/mode_changed 不触发，
+    终答不被误落账）；②交互伪事件落账前（保序，§4.2 触发点 2）。
+    落账条目经 live_hooks["step"] 计入折叠行 N（§4.3：N 含正文段落账条目；
+    钩子未接线时为 no-op，降级/管道无折叠行不受影响）。
+    """
+    if ctx.text_segment:
+        ctx.session_events.append(("text_segment", {"text": "".join(ctx.text_segment)}))
+        ctx.live_hooks.get("step", lambda: None)()
+    ctx.text_segment.clear()
 
 
 def sanitize_input(raw: str) -> str:
@@ -262,7 +280,8 @@ def make_ask_callback(ctx: ReplContext):
                     result = None
                 else:
                     result = options[int(raw) - 1] if raw.isdigit() and 1 <= int(raw) <= len(options) else raw
-            ctx.turn_events.append(("ask", {"summary": f"提问「{question[:40]}」→ 回答：{result or '（未响应）'}"}))
+            flush_text_segment(ctx)  # §4.2 触发点 2：伪事件前保序落账正文段
+            ctx.session_events.append(("ask", {"summary": f"提问「{question[:40]}」→ 回答：{result or '（未响应）'}"}))
             ctx.live_hooks.get("step", lambda: None)()  # N 口径：交互伪事件计入思考步数（§3.1）
             return result
         finally:
@@ -343,7 +362,8 @@ def make_decision_callback(ctx: ReplContext):
                         decision = ApprovalDecision(choice="reject", reason=_reject_reason())
                     else:
                         console.print("[glaucous.error]  无效输入，请重试。[/]")
-            ctx.turn_events.append(("decision", {
+            flush_text_segment(ctx)  # §4.2 触发点 2：伪事件前保序落账正文段
+            ctx.session_events.append(("decision", {
                 "summary": f"审批 {action.kind} {action.target} → {decision.choice}",
             }))
             ctx.live_hooks.get("step", lambda: None)()  # N 口径：交互伪事件计入思考步数（§3.1）
@@ -604,6 +624,7 @@ class ThinkingView:
         self.count = 0
         self._live: Live | None = None
         self._lines: list[str] = []
+        self._text_buf = ""  # 正文增量滚动缓冲（F4 §4.2，仅尾部两行进窗口）
         self._degraded = False
 
     @property
@@ -631,6 +652,24 @@ class ThinkingView:
         self._lines.append(line)
         self._live.update(self._renderable())
 
+    def add_text(self, delta: str) -> None:
+        """正文增量进动态区滚动（F4 §4.2：生成期间允许临时泄露，轮末收缩折叠）。
+
+        缓冲尾部两行进滚动窗口，视觉等同流式生成中；不计数（N 口径 = 非 text
+        事件 + 交互伪事件 + 正文段落账条目，不含增量，§4.3）。
+        """
+        if not self.active:
+            return
+        self._text_buf += delta
+        self._live.update(self._renderable())
+
+    def start_turn(self) -> None:
+        """轮级状态重置（F4 §4.3）：计数清零、滚动行与正文尾清空；Live 实例保留复用。
+        会话缓冲不在此列（session_events 仅 /clear、/resume 由命令层清空）。"""
+        self.count = 0
+        self._lines.clear()
+        self._text_buf = ""
+
     def note_step(self) -> None:
         """交互伪事件计数（不占动态区行）：交互以卡片形式呈现，但 N 口径需含（§3.1：
         N = 非 text 事件 + 交互伪事件，与缓冲//expand 同一口径）。经 live_hooks["step"] 接线。"""
@@ -638,8 +677,15 @@ class ThinkingView:
 
     def _renderable(self) -> Group:
         header = f"[glaucous.sub]⚙ 思考中 · {self.count} 步[/]"
-        recent = [f"[glaucous.dim]{escape(line)}[/]" for line in self._lines[-THINKING_MAX_LINES:]]
-        return Group(*([header] + recent))
+        # 正文尾行占窗口（F4 §4.2：生成中正文滚动可见，最终被收缩折叠）
+        text_tail = []
+        if self._text_buf:
+            text_tail = [
+                line if len(line) <= THINKING_LINE_WIDTH else line[:THINKING_LINE_WIDTH] + "…"
+                for line in self._text_buf.split("\n")[-2:]
+            ]
+        recent = (self._lines[-(THINKING_MAX_LINES - len(text_tail)):] + text_tail)[-THINKING_MAX_LINES:]
+        return Group(*([header] + [f"[glaucous.dim]{escape(line)}[/]" for line in recent]))
 
     def pause(self) -> None:
         # 阻塞交互前让位：保留已渲染内容，交互输出正常打印；重复调用无副作用（契约）
@@ -663,45 +709,6 @@ class ThinkingView:
         self._live.update(summary)
         self._live.stop()
         self._live = None
-
-
-def _render_md_tool_end(payload: dict[str, Any], ws: Workspace) -> bool:
-    """agent 路径：read_file 打开 markdown 时渲染卡片替代默认摘要（尽力而为）。
-
-    判定：tool_end 事件、工具为 read_file、结果 ok、path 以 .md/.markdown 结尾。
-    - 行数 ≤ MD_RENDER_MAX_LINES → 沙箱校验后读**文件原文**渲染卡片
-      （read_file 结果带行号 files.py:96，渲染必须读原文才不破坏 md 结构）；
-    - 超长 → 打印 /view 提示并返回 False（维持默认 3 行摘要）；
-    - 渲染失败（越界/IO/非 UTF-8）→ 返回 False 回退默认摘要，不阻断会话。
-    """
-    call = payload.get("call")
-    result = payload.get("result")
-    if call is None or getattr(call, "name", "") != "read_file":
-        return False
-    if result is None or not result.ok:
-        return False
-    try:
-        args = json.loads(getattr(call, "arguments", "") or "{}")
-    except json.JSONDecodeError:
-        return False
-    path = args.get("path")
-    if not isinstance(path, str) or not path.lower().endswith((".md", ".markdown")):
-        return False
-    lines = (result.content or "").count("\n") + 1
-    if lines > MD_RENDER_MAX_LINES:
-        console.print(f"[glaucous.muted]  （markdown 较长，可用 /view {escape(path)} 查看渲染）[/]")
-        return False
-    try:
-        target = ws.check(path)
-        text = target.read_text(encoding="utf-8")
-    except (WorkspaceEscape, OSError, UnicodeDecodeError):
-        return False
-    try:
-        rel = target.relative_to(ws.root)
-    except ValueError:
-        rel = target
-    render_markdown_doc(f":book: {rel}", text)
-    return True
 
 
 # /view 按后缀分发的渲染器注册表（M3 3.3 扩展：代码/文本/CSV）
@@ -883,7 +890,8 @@ def build_registry(ctx: ReplContext, ws: Workspace, thinking: ThinkingView | Non
                 ctx.state.enter_build(POLICY_PER_ACTION)
             elif decision.choice == CHOICE_BUILD_AUTO_APPROVE:
                 ctx.state.enter_build(POLICY_AUTO_APPROVE)
-            ctx.turn_events.append(("plan_decision", {
+            flush_text_segment(ctx)  # §4.2 触发点 2：伪事件前保序落账正文段
+            ctx.session_events.append(("plan_decision", {
                 "summary": f"方案决策 → {decision.choice}"
                 + (f"（反馈：{decision.feedback}）" if decision.feedback else ""),
             }))
@@ -897,33 +905,39 @@ def build_registry(ctx: ReplContext, ws: Workspace, thinking: ThinkingView | Non
 
 
 def make_on_event(ctx: ReplContext, ws: Workspace, thinking: ThinkingView | None = None):
-    """loop 事件回调：主题化渲染 + 思考折叠分流 + budget 缓存（状态栏数据源）。
+    """loop 事件回调：正文缓冲 + 动态区滚动 + 会话缓冲（v1.1 反馈 F4 重构）。
 
-    v1.1 R3 分流：text 增量两种模式下均逐字实时打印（不进思考区）；非 text 事件
-    一律先记入 turn_events 缓冲（/expand 口径）——折叠开且 Live 存活时渲染进动态区，
-    否则维持现状逐条实时打印。tool_end 的 markdown 卡片为直接打印，前后暂停/恢复 Live。
+    text 增量：折叠激活时累积进当前段正文缓冲（ctx.text_segment）并经 add_text
+    进动态区滚动（允许临时泄露，轮末收缩折叠）；降级/管道维持逐字直接打印、不缓冲。
+    非 text 事件照常落账会话缓冲（/expand 全会话口径）；tool_start 到达先触发正文段
+    flush（§4.2 触发点 1）；diagnostic 必达豁免：不进动态区、即时直接打印（终止
+    诊断契约），照常落账。tool_end md 卡片已删除（决策记录②），一律走思考区摘要。
     """
 
     def on_event(event: str, payload: dict[str, Any]) -> None:
         if event == "text":
             ctx.stream_state["printed"] = True
+            if thinking is not None and thinking.active:
+                ctx.text_segment.append(payload["text"])
+                thinking.add_text(payload["text"])
+            else:
+                render_event(event, payload, ctx.state)  # 降级/管道：逐字直接打印
+            return
+        if event == "diagnostic":
+            # B4 修复：终止诊断必达——不进动态区收缩（直打可见），照常落账；
+            # 计入 N 但不占动态区行（§4.3：N 含 diagnostic）
+            ctx.session_events.append((event, payload))
             render_event(event, payload, ctx.state)
+            if thinking is not None:
+                thinking.note_step()
             return
         if event == "budget":
             ctx.last_budget = payload
-        # 非 text 事件统一缓冲（含降级模式）：① 类条目，与思考区/摘要行同一口径（r4-B1）
-        ctx.turn_events.append((event, payload))
+        if event == "tool_start":
+            flush_text_segment(ctx)  # §4.2 触发点 1：中间步正文随首个工具调用落账
+        ctx.session_events.append((event, payload))
         if thinking is not None and thinking.active:
-            if event == "tool_end" and _render_md_tool_end(payload, ws):
-                thinking.pause()
-                try:
-                    thinking.add(event, payload)  # 卡片已直接打印，动态区仍收摘要行保持计数一致
-                finally:
-                    thinking.resume()
-            else:
-                thinking.add(event, payload)
-            return
-        if event == "tool_end" and _render_md_tool_end(payload, ws):
+            thinking.add(event, payload)
             return
         render_event(event, payload, ctx.state)
 
@@ -1060,12 +1074,14 @@ def _workspace_path_candidates(workspace: Path, arg: str) -> list:
         return []
 
 
-def make_repl_completer(workspace: Path):
-    """REPL 补全器（v1.1 R2，替换既有 WordCompleter）。
+def make_repl_completer(workspace: Path, model_names: Callable[[], list[str]] | None = None):
+    """REPL 补全器（v1.1 R2；反馈 F1 扩展 /model 参数补全与动态模型名）。
 
-    - 命令段：/ 开头且无空格 → 命令名前缀/模糊补全（meta 取自 commands.COMMAND_META，
+    - 命令段：/ 开头且无空格 → 命令名前缀补全（meta 取自 commands.COMMAND_META，
       单一数据源）；键入 / 立即列出全部（complete_while_typing 由 session 开启）；
-    - 路径段：PATH_ARG_COMMANDS 命令 + 已输入空格 → 工作区内路径补全；
+    - 参数段：ARG_COMPLETIONS 注册表——/view 路径补全、/model 模型名前缀过滤
+      （候选经 model_names() 动态取值：切换模型后列表跟随，不缓存快照；空格后
+      无输入列全部，前缀无匹配无候选，§1.3）；
     - 其他段（自由对话）：不弹补全；依赖导入失败返回 None（降级无补全，不拒启动）。
     """
     try:
@@ -1085,24 +1101,31 @@ def make_repl_completer(workspace: Path):
                     return
                 if " " not in text:
                     return  # 自由对话段不弹补全（需求 2 边界）
-                cmd = text.split(" ", 1)[0]
-                if cmd not in PATH_ARG_COMMANDS:
-                    return
-                arg = text.split(" ", 1)[1]
-                for cand in _workspace_path_candidates(workspace, arg):
-                    yield cand
+                cmd, _, arg = text.partition(" ")
+                kind = ARG_COMPLETIONS.get(cmd)
+                if kind == "path":
+                    yield from _workspace_path_candidates(workspace, arg)
+                elif kind == "model":
+                    for name in (model_names() if model_names else []):
+                        if not arg or name.startswith(arg):
+                            yield Completion(name, start_position=-len(arg), display_meta="模型档案")
 
         return _ReplCompleter()
     except Exception:  # noqa: BLE001 —— 补全器故障不拒启动：降级无补全输入
         return None
 
 
-def make_prompt_session(workspace: Path):
-    """构造 prompt_toolkit PromptSession（M3-UI PT_STYLE + R2 增强补全）。
+def make_prompt_session(workspace: Path, model_names: Callable[[], list[str]] | None = None):
+    """构造 prompt_toolkit PromptSession（M3-UI PT_STYLE + R2 补全 + 反馈 F1 交互）。
 
     降级三条件命中返回 None：① GLAUCOUS_INPUT=plain（显式开关）；② stdin
     非 TTY（测试/管道）；③ prompt_toolkit 导入/构造失败（依赖损坏不拒启动，
     m3-day5 plan §4.3）——导入在此延迟，顶层不依赖 prompt_toolkit。
+
+    F1 两段式 Enter：补全菜单打开时 Enter 仅接受选中候选（无选中取第一条，
+    候选文本落入输入行、菜单关闭），不提交执行；菜单未打开时 Enter 正常提交。
+    Escape 取消补全（complete_state 清空），随后 Enter 直接提交（S1 衔接闭环）。
+    默认选中第一条：候选刷新后若无选中项自动选第一候选（仅高亮，不落文本）。
     """
     if os.environ.get("GLAUCOUS_INPUT", "").strip().lower() == "plain":
         return None
@@ -1111,20 +1134,54 @@ def make_prompt_session(workspace: Path):
     try:
         from prompt_toolkit import PromptSession
         from prompt_toolkit.history import FileHistory
+        from prompt_toolkit.key_binding import KeyBindings
 
         (workspace / ".glaucous").mkdir(exist_ok=True)
         try:
             input_history: FileHistory | None = FileHistory(workspace / ".glaucous" / "input_history")
         except OSError:
             input_history = None
+
+        kb = KeyBindings()
+
+        @kb.add("enter")
+        def _two_stage_enter(event) -> None:
+            # 两段式（§1.2）：菜单打开时仅接受候选；候选与输入行完全一致（apply
+            # 后菜单重开且无新文本可补）时视为已确认，直接提交
+            buffer = event.current_buffer
+            state = buffer.complete_state
+            if state and state.completions:
+                completion = state.current_completion or state.completions[0]
+                cursor = buffer.cursor_position
+                head = buffer.text[: max(0, cursor + completion.start_position)]
+                tail = buffer.text[cursor:]
+                if head + completion.text + tail != buffer.text:
+                    buffer.apply_completion(completion)
+                    return
+            buffer.validate_and_handle()
+
+        @kb.add("escape")
+        def _skip_completion(event) -> None:
+            event.current_buffer.cancel_completion()
+
         # PT_STYLE 为 None（prompt_toolkit 可导入但样式构造失败）时传默认样式；
-        # complete_while_typing：键入 / 即弹命令列表（需求 2）
-        return PromptSession(
+        # complete_while_typing：键入 / 即弹命令列表（需求 2）；key_bindings：F1 两段式
+        session = PromptSession(
             history=input_history,
             style=PT_STYLE,
-            completer=make_repl_completer(workspace),
+            completer=make_repl_completer(workspace, model_names),
             complete_while_typing=True,
+            key_bindings=kb,
         )
+
+        # 默认选中第一条（§1.1）：候选刷新后无选中项时自动选第一候选（仅高亮）
+        def _select_first(event) -> None:
+            state = event.completion_state
+            if state and state.completions and state.complete_index is None:
+                session.default_buffer.complete_next()
+
+        session.default_buffer.on_completions_changed += _select_first
+        return session
     except Exception:  # noqa: BLE001 —— 输入层故障不拒启动：降级 console.input
         return None
 
@@ -1137,7 +1194,7 @@ def make_prompt_session(workspace: Path):
 def _collapse_enabled() -> bool:
     """思考折叠开关（v1.1 R3）：stdout TTY 且未显式关闭（GLAUCOUS_COLLAPSE=off）。
 
-    关闭/管道时不开 Live：事件维持现状逐条实时打印；turn_events 仍缓冲（/expand 可用）。
+    关闭/管道时不开 Live：事件维持现状逐条实时打印；会话缓冲仍记录（/expand 可用）。
     """
     return sys.stdout.isatty() and os.environ.get("GLAUCOUS_COLLAPSE", "").strip().lower() != "off"
 
@@ -1194,7 +1251,7 @@ async def repl(workspace: Path, resume_id: str | None) -> None:
     theme.model_name = default
 
     # 思考折叠装配（v1.1 R3）：TTY 且未显式关闭才启用动态区；
-    # 关闭/管道时 thinking 为 None：事件维持现状逐条实时打印，turn_events 仍缓冲（/expand 可用）
+    # 关闭/管道时 thinking 为 None：事件维持现状逐条实时打印，会话缓冲仍记录（/expand 可用）
     thinking: ThinkingView | None = ThinkingView() if _collapse_enabled() else None
 
     ctx = ReplContext(
@@ -1228,7 +1285,8 @@ async def repl(workspace: Path, resume_id: str | None) -> None:
     render_banner(ctx.current_model, prompt_mode(ctx.state))
     # /view 专用沙箱（Workspace 轻量无状态，独立于重建循环）
     view_ws = Workspace(workspace, read_only_extra=config.read_only_extra)
-    session = make_prompt_session(workspace)
+    # F1：模型名补全候选经闭包动态取值（/model 切换后跟随，不缓存快照）
+    session = make_prompt_session(workspace, model_names=lambda: list(ctx.registry_entries))
 
     while True:
         # 输入区头部（rich，两路径共用）：模型 + ctx 占用行；模式段并入输入行前缀；
@@ -1260,14 +1318,18 @@ async def repl(workspace: Path, resume_id: str | None) -> None:
             result = await handle_command(task, ctx)
             if result == "exit":
                 return
-            continue
-        # 任务轮开始：重置上一轮思考缓冲与用量（r4-B2 时机：轮末保留、轮首重置；
-        # /expand 在本轮结束至此处之间可回看上一轮）
-        reset_turn_buffers(ctx)
+            if not ctx.pending_task:
+                continue
+            # F3：/skill 组装的任务立即执行一轮（与用户输入任务同一入口），当次生效
+            task, ctx.pending_task = ctx.pending_task, None
+        # 任务轮开始：轮级重置（F4 §4.3 begin_turn：清 turn_usage 与正文段缓冲，
+        # 不动会话缓冲；session_events 仅 /clear、/resume 清空，/expand 回看全会话）
+        begin_turn(ctx)
         if thinking is not None:
-            thinking.count = 0
+            thinking.start_turn()
             thinking.start()  # 启动失败内部降级实时打印，本轮不再尝试（§3.3）
-        # 自然终答已流式打印（补收尾换行）；终止诊断由 diagnostic 事件交付
+        # 终答不自流式直出（F4：折叠时进缓冲、降级时已直出），轮末统一呈现；
+        # 终止诊断由 diagnostic 事件必达交付
         ctx.stream_state["printed"] = False
         answer = None
         turn_ok = False
@@ -1283,18 +1345,28 @@ async def repl(workspace: Path, resume_id: str | None) -> None:
             console.print(f"[glaucous.error]\n✘ 本轮执行失败：{escape(str(exc))}[/]")
             continue
         finally:
-            # 轮末渲染顺序固定（§3.1）：折叠摘要行 → R7 md 卡片 → R5 用量行；
-            # 异常路径：收缩与用量行仍执行，卡片跳过；缓冲保留供 /expand 回看
+            # 轮末时序（F4 §4.4）：折叠摘要行 → 最终回答自缓冲一次性输出 + 🕊 卡片 →
+            # 用量行；异常路径：收缩与用量行照常，正文段落账后清空（B3），不呈现。
             if thinking is not None:
                 thinking.close(ctx.turn_usage)
             if turn_ok:
-                if answer and ctx.stream_state["printed"]:
+                body = "".join(ctx.text_segment).strip()
+                if body:
+                    # §4.4 步骤 3：最终回答流末一次性完整输出（替代逐字流式，偏离经
+                    # 用户确认）；🕊 md 卡片保留（与正文一致属预期）
                     console.print()
-                if answer and answer.strip() and session is not None:
-                    # R7：TTY 且回答非空才追加 Markdown 卡片（管道纯文本已输出，不重复）；
-                    # session 非 None 即 TTY 非降级（make_prompt_session 三条件），与箭头选择同口径。
-                    # 偏离登记（S5）：概设 §8.4「正文不套面板」，用户决策的产品化呈现。
-                    render_answer_card(answer)
+                    console.print(body, soft_wrap=True, markup=False, emoji=False)
+                    if session is not None:
+                        render_answer_card(body)
+                elif answer and ctx.stream_state["printed"]:
+                    # 降级/管道轮：正文已逐字直接打印，仅补收尾换行与卡片（TTY）
+                    console.print()
+                    if answer.strip() and session is not None:
+                        render_answer_card(answer)
+            else:
+                # §4.4 步骤 5（B3）：异常轮正文段落账供 /expand 全会话，不呈现
+                flush_text_segment(ctx)
+            ctx.text_segment.clear()  # 终答不落账（§4.2），轮末清空兜底
             usage_text = _usage_line(ctx.turn_usage)
             if usage_text:
                 # 管道模式同样打印（纯文本无样式）；数值为纯数字字符串无需 escape（§5.2）

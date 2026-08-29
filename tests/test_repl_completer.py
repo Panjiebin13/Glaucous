@@ -73,7 +73,8 @@ class TestPathCompletion:
         texts = {c.text for c in complete(completer, "/view docs/")}
         assert texts == {"docs/guide.md"}
 
-    def test_non_path_command_no_path_candidates(self, workspace: Path) -> None:
+    def test_model_without_source_no_candidates(self, workspace: Path) -> None:
+        """未提供 model_names 数据源时 /model 无候选（降级安全，不抛错）。"""
         completer = cli.make_repl_completer(workspace)
         assert complete(completer, "/model ") == []
 
@@ -81,6 +82,34 @@ class TestPathCompletion:
         """遍历异常（目录不存在）静默返回空候选，不抛错（§2.2）。"""
         completer = cli.make_repl_completer(tmp_path / "not-exists")
         assert complete(completer, "/view ") == []
+
+
+class TestModelCompletion:
+    """F1 /model 参数补全（spec §1.3）：候选经 model_names() 动态取值。"""
+
+    def test_lists_all_when_no_arg(self, workspace: Path) -> None:
+        names = ["deepseek-chat", "deepseek-reasoner", "gpt-4o"]
+        completer = cli.make_repl_completer(workspace, model_names=lambda: names)
+        texts = {c.text for c in complete(completer, "/model ")}
+        assert texts == {"deepseek-chat", "deepseek-reasoner", "gpt-4o"}
+
+    def test_prefix_filters(self, workspace: Path) -> None:
+        names = ["deepseek-chat", "deepseek-reasoner", "gpt-4o"]
+        completer = cli.make_repl_completer(workspace, model_names=lambda: names)
+        texts = {c.text for c in complete(completer, "/model deep")}
+        assert texts == {"deepseek-chat", "deepseek-reasoner"}
+
+    def test_dynamic_callable_follows_registry(self, workspace: Path) -> None:
+        """延迟取值：列表变化后候选跟随（不缓存快照，§1.3）。"""
+        names = ["model-a"]
+        completer = cli.make_repl_completer(workspace, model_names=lambda: list(names))
+        assert {c.text for c in complete(completer, "/model ")} == {"model-a"}
+        names.append("model-b")
+        assert {c.text for c in complete(completer, "/model ")} == {"model-a", "model-b"}
+
+    def test_no_match_no_candidates(self, workspace: Path) -> None:
+        completer = cli.make_repl_completer(workspace, model_names=lambda: ["deepseek-chat"])
+        assert complete(completer, "/model gpt") == []
 
 
 class TestFreeText:

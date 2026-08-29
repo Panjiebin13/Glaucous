@@ -52,12 +52,13 @@ COMMAND_META: dict[str, str] = {
     "/model": "列出模型档案 / 切换档案（切换时连通性校验）",
     "/memory": "查看记忆（/memory add|del 管理）",
     "/rules": "查看全局/项目规则文件",
-    "/skills": "查看已注册技能与加载状态",
+    "/skills": "列出技能（任务匹配自动生效，/skill 可手动调用）",
+    "/skill": "手动调用技能（立即执行一轮任务）",
     "/init": "生成 glaucous.md 草稿（确认后写入）",
     "/stop": "优雅结束会话（会话已落盘）",
     "/exit": "退出会话",
     "/view": "查看工作区文件（按类型渲染 Markdown/代码/CSV）",
-    "/expand": "回看上一轮思考过程（折叠缓冲）",
+    "/expand": "回看本会话思考过程",
 }
 
 # 展示形态（含参数占位与别名）；未列出的命令直接用命令名展示。/exit /quit 条目保留（附加项 C）。
@@ -66,6 +67,7 @@ _COMMAND_USAGE: dict[str, str] = {
     "/model": "/model [name]",
     "/exit": "/exit  /quit",
     "/view": "/view <文件路径>",
+    "/skill": "/skill <名> [任务描述]",
 }
 
 
@@ -109,11 +111,15 @@ class ReplContext:
     last_budget: dict | None = None    # 最近一次 budget 事件 payload（状态栏数据源）
     # 内部：本轮是否已打印流式正文（repl 判断是否补收尾换行）
     stream_state: dict[str, bool] = field(default_factory=lambda: {"printed": False})
-    # —— v1.1 打磨 R3：思考过程缓冲（最近一轮）——
+    # —— v1.1 F4：会话级思考过程缓冲（F4 语义变更：跨轮保留，仅 /clear、/resume 清空）——
     # 条目为 (event, payload)：① 非 text 的 on_event 事件；② 交互伪事件（ask/decision/
-    # plan_decision）。text 增量不缓冲（与思考区收纳口径一致）。轮末保留，
-    # 下一轮任务开始时由 reset_turn_buffers 重置（间隙内 /expand 可回看）。
-    turn_events: list = field(default_factory=list)
+    # plan_decision）；③ 中间步正文段（"text_segment"，由 flush_text_segment 落账）。
+    session_events: list = field(default_factory=list)
+    # 当前段正文缓冲（仅内存，F4 §4.2）：text 增量累积于此，tool_start/伪事件落账前
+    # flush；轮末为最终回答（输出后清空），异常轮落账后清空（§4.4 步骤 5）
+    text_segment: list[str] = field(default_factory=list)
+    # F3 /skill：待执行的任务文本（_cmd_skill 组装；repl 消费后置 None，仅驱动一次 run）
+    pending_task: str | None = None
     # Live 区暂停/恢复钩子：阻塞交互进入前 pause、返回后 resume；
     # 折叠关闭/管道时由 repl 注入 no-op（默认即 no-op）
     live_hooks: dict[str, Any] = field(
@@ -127,13 +133,15 @@ class ReplContext:
     counting_usage: bool = True
 
 
-def reset_turn_buffers(ctx: ReplContext) -> None:
-    """轮次开始时重置思考缓冲与用量（v1.1 打磨 R3/R5，r4-B2 时机）。
+def begin_turn(ctx: ReplContext) -> None:
+    """轮级状态重置（v1.1 F4，取代前批 reset_turn_buffers 语义）。
 
-    调用时机：repl 拿到非斜杠输入、调 run() 之前；/clear、/resume 也显式调用
-    （ctx 为同一对象复用，字段不会随 rebuild_loop 自然重置）。
+    清 turn_usage（保持 R5「本轮累计」口径，不跨轮累加）与当前正文段缓冲；
+    **不动会话缓冲 session_events**（/expand 回看全会话，仅 /clear、/resume 清空）。
+    调用点：repl 的两处任务轮入口（用户输入任务、/skill 消费）；轮计数器
+    （thinking.count）由 repl 在 begin_turn 后同步清零（thinking 可能不存在）。
     """
-    ctx.turn_events.clear()
+    ctx.text_segment.clear()
     ctx.turn_usage.update({"prompt": 0, "completion": 0, "cache_hit": None, "cache_miss": None})
 
 
@@ -224,7 +232,8 @@ async def _cmd_clear(ctx: ReplContext) -> bool:
     ctx.state = SessionState()
     ctx.last_budget = None
     ctx.renderer.last_budget = None
-    reset_turn_buffers(ctx)  # v1.1 R3：新会话无上一轮思考缓冲，/expand 回到空态提示
+    ctx.session_events.clear()  # v1.1 F4：新会话无思考缓冲，/expand 回到空态提示
+    begin_turn(ctx)
     rebuild_loop(ctx)
     ctx.renderer.info("已开始新会话（规则/记忆/技能索引已刷新；旧会话可用 /resume 找回）。")
     return True
@@ -241,7 +250,8 @@ async def _cmd_resume(ctx: ReplContext, arg: str) -> bool:
     ctx.state = state
     ctx.last_budget = None
     ctx.renderer.last_budget = None
-    reset_turn_buffers(ctx)  # v1.1 R3：恢复的是历史会话，不携带本轮思考缓冲
+    ctx.session_events.clear()  # v1.1 F4：恢复的是历史会话，不携带思考缓冲
+    begin_turn(ctx)
     rebuild_loop(ctx)
     return True
 
@@ -353,19 +363,44 @@ async def _cmd_rules(ctx: ReplContext) -> bool:
 
 
 async def _cmd_skills(ctx: ReplContext) -> bool:
+    """列出技能（v1.1 F2：去加载状态展示——惰性加载是设计使然，不产生误导）。"""
     infos = ctx.skills.infos()
     if not infos:
         ctx.renderer.note("未注册任何技能（内置/全局/项目目录均未发现 SKILL.md）。")
     else:
-        loaded = ctx.skills.loaded_names()
-        ctx.renderer.note("已注册技能（任务相关时模型会经 load_skill 加载正文）：")
+        ctx.renderer.note("已注册技能：")
         for info in infos:
-            state = "✓ 已加载" if info.name in loaded else "· 未加载"
             ctx.renderer.note(
-                f"  {info.name} [{SOURCE_LABEL.get(info.source, info.source)}|{state}] {info.description}"
+                f"  {info.name} [{SOURCE_LABEL.get(info.source, info.source)}] {info.description}"
             )
+    ctx.renderer.note("技能在任务匹配时自动生效；也可用 /skill <名> [任务描述] 手动调用。")
     for warning in ctx.skills.warnings:
         ctx.renderer.error(f"扫描告警：{warning}")
+    return True
+
+
+async def _cmd_skill(ctx: ReplContext, arg: str) -> bool:
+    """手动调用技能（v1.1 F3）：组装任务文本写入 pending_task，由 repl 立即执行。
+
+    当次生效：仅驱动一次 run()，不注入 system prompt；描述可省略（以技能
+    正文本身作为任务指令）；名字与技能名完全相等（不做前缀/模糊匹配）。
+    """
+    parts = arg.strip().split(maxsplit=1)
+    available = [info.name for info in ctx.skills.infos()]
+    if not parts:
+        ctx.renderer.note("用法：/skill <名> [任务描述]")
+        ctx.renderer.note(f"可用技能：{'、'.join(available) or '（无）'}")
+        return True
+    name = parts[0]
+    desc = parts[1].strip() if len(parts) > 1 else ""
+    body = ctx.skills.skill_text(name)
+    if body is None:
+        ctx.renderer.error(f"未注册技能 {name!r}，可用：{'、'.join(available) or '（无）'}")
+        return True
+    ctx.pending_task = (
+        "请按照以下技能的指令执行。\n\n"
+        f"[技能 {name}]\n{body}\n\n用户任务：{desc or '按技能指令执行'}"
+    )
     return True
 
 
@@ -398,21 +433,37 @@ async def _cmd_init(ctx: ReplContext) -> bool:
 
 
 async def _cmd_expand(ctx: ReplContext) -> bool:
-    """回看上一轮思考过程（v1.1 打磨 R3）：逐条重放缓冲，仅读不改状态。
+    """回看本会话思考过程（v1.1 F4 语义：全会话重放，仅 /clear、/resume 清空）。
 
-    缓冲保留至下一轮开始，间隙内可回看；缓冲为空（首轮未跑任务、
-    /clear 或 /resume 重置后）提示暂无（r5-S1：run() 期间输入被阻塞，无其他分支）。
+    条目重放：交互伪事件摘要、中间步正文段全文、tool_end 全量结果内容
+    （§4.2：缓冲保留全量，重放可见完整内容），仅读不改状态。
     """
     from .cli import render_event  # 延迟导入：cli 顶层导入本模块，避免模块环（同 _cmd_clear）
 
-    if not ctx.turn_events:
+    if not ctx.session_events:
         ctx.renderer.note("暂无可展开的思考过程。")
         return True
-    ctx.renderer.note("── 思考过程（上一轮）──")
-    for event, payload in ctx.turn_events:
+    ctx.renderer.note("── 思考过程（本会话）──")
+    for event, payload in ctx.session_events:
         if event in ("ask", "decision", "plan_decision"):
             # 交互伪事件：非 on_event 事件，直接摘要展示（人机交互完整回看）
             ctx.renderer.note(f"  ❓ {event}: {payload.get('summary', payload)}")
+        elif event == "text_segment":
+            # 中间步正文段：全文重放（F4 §4.3 ③ 类条目）
+            ctx.renderer.note("  💬 中间步正文：")
+            for line in payload.get("text", "").splitlines() or [""]:
+                ctx.renderer.note(f"    {line}")
+        elif event == "tool_end":
+            # 工具结果全量重放（不受摘要行数限制，spec §4.2 完整可见）
+            result = payload.get("result")
+            call = payload.get("call")
+            name = getattr(call, "name", "?")
+            args = getattr(call, "arguments", "") or ""
+            brief = args if len(args) <= 80 else args[:80] + "…"
+            ctx.renderer.note(f"  ⏺ {name} {brief}")
+            content = (getattr(result, "content", "") or "") if result is not None else ""
+            for line in content.splitlines() or [""]:
+                ctx.renderer.note(f"    ⎿ {line}")
         else:
             render_event(event, payload, ctx.state)
     return True
@@ -458,6 +509,8 @@ async def handle_command(line: str, ctx: ReplContext) -> bool | str:
         return await _cmd_rules(ctx)
     if cmd == "/skills":
         return await _cmd_skills(ctx)
+    if cmd == "/skill":
+        return await _cmd_skill(ctx, rest)
     if cmd == "/init":
         return await _cmd_init(ctx)
     if cmd == "/expand":

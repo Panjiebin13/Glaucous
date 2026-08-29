@@ -123,6 +123,11 @@ class SkillRegistry:
         self._loaded.add(name)
         return body
 
+    def skill_text(self, name: str) -> str | None:
+        """按名取技能正文（v1.1 反馈 F3 /skill 手动调用）：纯读取无副作用，
+        不标记加载态（加载状态不对外呈现，正文入史语义由调用方决定）。"""
+        return self._bodies.get(name)
+
     def infos(self) -> list[SkillInfo]:
         """全部已注册技能（按名称排序，/skills 展示用）。"""
         return sorted(self._skills.values(), key=lambda info: info.name)

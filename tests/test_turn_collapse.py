@@ -1,8 +1,12 @@
-"""R3 思考折叠单测（v1.1 打磨 §3）：缓冲口径 / 重置时机 / /expand 分支 / N 一致性 /
-COLLAPSE=off / 异常路径缓冲保留。
+"""思考折叠缓冲时序单测（v1.1 反馈修复批次 F4）。
 
-不跑真实 repl：以 make_on_event + reset_turn_buffers + _cmd_expand + _collapse_enabled
-的单元组合覆盖时序契约（text 不进缓冲、轮首重置轮末保留、交互伪事件同口径）。
+覆盖 spec §4.2~§4.5 契约：正文段缓冲与落账（tool_start 触发、终答后
+budget/mode_changed 不触发、空段不落账、伪事件前保序）、begin_turn 轮级重置
+（不动会话缓冲）、/clear 与 /resume 重置会话缓冲、diagnostic 必达直打并计入 N、
+/expand 全会话重放、异常路径正文段落账、GLAUCOUS_COLLAPSE=off / 非 TTY 降级。
+
+不跑真实 repl：以 make_on_event + begin_turn + flush_text_segment + _cmd_expand
++ _collapse_enabled 的单元组合覆盖时序契约。
 """
 
 from __future__ import annotations
@@ -20,6 +24,7 @@ class FakeRenderer:
 
     def __init__(self) -> None:
         self.notes: list[str] = []
+        self.last_budget = None
 
     def note(self, text: str) -> None:
         self.notes.append(str(text))
@@ -36,7 +41,8 @@ def make_fake_ctx() -> SimpleNamespace:
     return SimpleNamespace(
         stream_state={"printed": False},
         last_budget=None,
-        turn_events=[],
+        session_events=[],
+        text_segment=[],
         turn_usage={"prompt": 0, "completion": 0, "cache_hit": None, "cache_miss": None},
         live_hooks={"pause": lambda: None, "resume": lambda: None},
         renderer=FakeRenderer(),
@@ -44,60 +50,212 @@ def make_fake_ctx() -> SimpleNamespace:
     )
 
 
+def make_active_thinking() -> cli.ThinkingView:
+    """注入假 Live 使 thinking.active 为 True（不启动真实 rich.live）。"""
+    view = cli.ThinkingView()
+    view._live = SimpleNamespace(update=lambda _r: None, stop=lambda: None, start=lambda: None)
+    return view
+
+
+def wire_step(ctx: SimpleNamespace, thinking: cli.ThinkingView) -> None:
+    """接线 N 口径（复刻 repl：折叠启用时 live_hooks["step"] = note_step）。"""
+    ctx.live_hooks["step"] = thinking.note_step
+
+
 MODE_PAYLOAD = {"reason": "方案获批", "mode": "build", "policy": "per-action"}
 
 
-class TestTurnBufferScope:
-    def test_text_not_buffered_non_text_buffered(self) -> None:
-        """缓冲口径：仅非 text 事件 + 交互伪事件；text 增量不缓冲（§3.1/§3.2）。"""
+class TestTextSegmentFlush:
+    """正文段缓冲与落账时序（spec §4.2，B1 修复核心）。"""
+
+    def test_degraded_text_prints_directly_not_buffered(self) -> None:
+        """降级/管道（thinking=None）：text 逐字直接打印，不进正文段缓冲。"""
         ctx = make_fake_ctx()
         on_event = cli.make_on_event(ctx, ws=None, thinking=None)
         on_event("text", {"text": "正文增量"})
-        on_event("mode_changed", MODE_PAYLOAD)
-        ctx.turn_events.append(("ask", {"summary": "提问 → 回答"}))  # 交互伪事件由回调记录
-        events = [event for event, _ in ctx.turn_events]
-        assert events == ["mode_changed", "ask"]
         assert ctx.stream_state["printed"] is True
+        assert ctx.text_segment == []
+        assert ctx.session_events == []
 
-    def test_count_consistency_between_view_and_buffer(self) -> None:
-        """摘要行 N 与缓冲同口径（非 text 事件 + 交互伪事件，r4-B1）：
-        add 逐条计数与缓冲条目一致；未激活时走降级实时打印不计数（无思考区）。"""
+    def test_active_text_buffered_and_flushed_on_tool_start(self) -> None:
+        """折叠激活：text 累积进正文段缓冲；tool_start 到达先落账（触发点 1）。
+
+        缓冲时序：text_segment 条目先于 tool_start 条目（/expand 时序保序）；
+        正文段落账条目计入 N（经 live_hooks["step"]，§4.3）。
+        """
         ctx = make_fake_ctx()
-        thinking = cli.ThinkingView()  # 不 start：Live 未激活 → 降级路径，缓冲仍记录（/expand 可用）
+        thinking = make_active_thinking()
+        wire_step(ctx, thinking)
         on_event = cli.make_on_event(ctx, ws=None, thinking=thinking)
-        on_event("mode_changed", MODE_PAYLOAD)
-        on_event("compressed", {"stage": "L2", "ok": True})
-        ctx.turn_events.append(("plan_decision", {"summary": "方案决策 → 1"}))
-        assert thinking.count == 0  # 降级实时打印：无思考区不计数（呈现层降级，缓冲不受影响）
-        assert len(ctx.turn_events) == 3  # 缓冲口径：非 text 事件 + 交互伪事件（/expand 完整回看）
-        # N 口径验证：直接驱动 add（Live 激活时的收纳路径）+ note_step（交互伪事件，
-        # 经 live_hooks["step"] 接线）与缓冲同口径一致（§3.1）
-        view = cli.ThinkingView()
-        view.add("mode_changed", MODE_PAYLOAD)
-        view.add("compressed", {"stage": "L2", "ok": True})
-        view.note_step()  # 交互伪事件计入步数但不占动态区行
-        assert view.count == 3
+        on_event("text", {"text": "中间步"})
+        on_event("text", {"text": "正文"})
+        assert "".join(ctx.text_segment) == "中间步正文"
+        on_event("tool_start", {"call": SimpleNamespace(name="grep", arguments="pattern")})
+        events = [event for event, _ in ctx.session_events]
+        assert events == ["text_segment", "tool_start"]
+        assert ctx.text_segment == []
+        # N 口径：正文段（flush step +1）+ tool_start（add +1）
+        assert thinking.count == 2
 
+    def test_final_answer_not_flushed_by_budget(self) -> None:
+        """终答不被误落账（B1）：自然终止序列 budget/mode_changed 不是触发点。
 
-class TestResetTiming:
-    def test_reset_clears_events_and_usage(self) -> None:
+        loop 事实（agent/loop.py 自然终止）：终答正文 → budget → mode_changed；
+        终答留在正文段缓冲，由 repl 轮末呈现（§4.4 步骤 3）。
+        """
         ctx = make_fake_ctx()
-        ctx.turn_events.append(("mode_changed", MODE_PAYLOAD))
-        ctx.turn_usage.update({"prompt": 100, "completion": 20, "cache_hit": 50, "cache_miss": 50})
-        commands.reset_turn_buffers(ctx)
-        assert ctx.turn_events == []
-        assert ctx.turn_usage == {"prompt": 0, "completion": 0, "cache_hit": None, "cache_miss": None}
+        thinking = make_active_thinking()
+        wire_step(ctx, thinking)
+        on_event = cli.make_on_event(ctx, ws=None, thinking=thinking)
+        on_event("tool_start", {"call": SimpleNamespace(name="ls", arguments="")})
+        on_event("text", {"text": "最终回答"})
+        on_event("budget", {"percent": 0.1, "level": "low"})
+        on_event("mode_changed", MODE_PAYLOAD)
+        events = [event for event, _ in ctx.session_events]
+        assert "text_segment" not in events
+        assert "".join(ctx.text_segment) == "最终回答"
 
-    def test_buffer_retained_until_next_turn_start(self) -> None:
-        """轮末保留（含异常路径）、轮首才重置（r4-B2）：模拟 run 抛错后缓冲仍在。"""
+    def test_empty_segment_not_recorded(self) -> None:
+        """空正文段不落账不计数（S3）：纯工具步（无正文）不产生 text_segment 条目。"""
+        ctx = make_fake_ctx()
+        thinking = make_active_thinking()
+        wire_step(ctx, thinking)
+        on_event = cli.make_on_event(ctx, ws=None, thinking=thinking)
+        on_event("tool_start", {"call": SimpleNamespace(name="ls", arguments="")})
+        events = [event for event, _ in ctx.session_events]
+        assert events == ["tool_start"]
+        assert thinking.count == 1  # 仅 tool_start 自身，无 flush 计数
+
+    def test_abnormal_turn_flush_records_segment(self) -> None:
+        """异常轮（B3）：finally 中 flush 落账正文段后清空（供 /expand，不呈现）。"""
+        ctx = make_fake_ctx()
+        thinking = make_active_thinking()
+        wire_step(ctx, thinking)
+        on_event = cli.make_on_event(ctx, ws=None, thinking=thinking)
+        on_event("text", {"text": "被中断的正文"})
+        cli.flush_text_segment(ctx)  # repl finally 异常路径（§4.4 步骤 5）
+        events = [event for event, _ in ctx.session_events]
+        assert events == ["text_segment"]
+        assert ctx.text_segment == []
+
+    def test_flush_unit_semantics(self) -> None:
+        """flush_text_segment 单元语义：非空落账+清空；空仅清空。"""
+        ctx = make_fake_ctx()
+        cli.flush_text_segment(ctx)
+        assert ctx.session_events == []
+        ctx.text_segment.append("内容")
+        cli.flush_text_segment(ctx)
+        assert ctx.session_events == [("text_segment", {"text": "内容"})]
+        assert ctx.text_segment == []
+
+
+class TestDiagnosticBypass:
+    """diagnostic 必达豁免（B4）：直打不进动态区，落账并计入 N。"""
+
+    def test_diagnostic_prints_records_counts_not_windowed(self) -> None:
+        ctx = make_fake_ctx()
+        thinking = make_active_thinking()
+        wire_step(ctx, thinking)
+        on_event = cli.make_on_event(ctx, ws=None, thinking=thinking)
+        on_event("tool_start", {"call": SimpleNamespace(name="ls", arguments="")})
+        on_event("diagnostic", {"text": "已达步数上限"})
+        # 落账（/expand 可回看）
+        assert ("diagnostic", {"text": "已达步数上限"}) in ctx.session_events
+        # 计入 N（§4.3 含 diagnostic）但不占动态区行
+        assert thinking.count == 2
+        assert len(thinking._lines) == 1  # 仅 tool_start 摘要行
+
+
+class TestBufferScope:
+    def test_non_text_buffered_degraded(self) -> None:
+        """降级口径：非 text 事件 + 交互伪事件入会话缓冲（§4.5：管道 /expand 可用）。"""
         ctx = make_fake_ctx()
         on_event = cli.make_on_event(ctx, ws=None, thinking=None)
         on_event("mode_changed", MODE_PAYLOAD)
-        # 模拟异常轮：缓冲未被轮末清空（repl finally 不做清空，仅收缩/渲染）
-        assert len(ctx.turn_events) == 1
-        # 下一轮任务开始才重置
-        commands.reset_turn_buffers(ctx)
-        assert ctx.turn_events == []
+        ctx.session_events.append(("ask", {"summary": "提问 → 回答"}))  # 交互伪事件由回调记录
+        events = [event for event, _ in ctx.session_events]
+        assert events == ["mode_changed", "ask"]
+
+    def test_count_consistency_between_view_and_buffer(self) -> None:
+        """摘要行 N 与缓冲同口径（§4.3）：降级不计数不占行；active 逐条收纳一致。"""
+        ctx = make_fake_ctx()
+        thinking = cli.ThinkingView()  # 未启动 → 降级路径，缓冲仍记录
+        on_event = cli.make_on_event(ctx, ws=None, thinking=thinking)
+        on_event("mode_changed", MODE_PAYLOAD)
+        on_event("compressed", {"stage": "L2", "ok": True})
+        ctx.session_events.append(("plan_decision", {"summary": "方案决策 → 1"}))
+        assert thinking.count == 0  # 降级：无思考区不计数（diagnostic 除外）
+        assert len(ctx.session_events) == 3
+        view = make_active_thinking()
+        view.add("mode_changed", MODE_PAYLOAD)
+        view.add("compressed", {"stage": "L2", "ok": True})
+        view.note_step()  # 交互伪事件计数不占行
+        assert view.count == 3
+
+
+class TestBeginTurn:
+    """begin_turn 轮级重置（B2）：清轮级状态，不动会话缓冲。"""
+
+    def test_clears_turn_level_keeps_session_buffer(self) -> None:
+        ctx = make_fake_ctx()
+        ctx.session_events.append(("mode_changed", MODE_PAYLOAD))
+        ctx.session_events.append(("text_segment", {"text": "上轮中间步正文"}))
+        ctx.text_segment.append("当前段残留")
+        ctx.turn_usage.update({"prompt": 100, "completion": 20, "cache_hit": 50, "cache_miss": 50})
+        commands.begin_turn(ctx)
+        # 会话缓冲跨轮保留（/expand 回看全会话，仅 /clear、/resume 清空）
+        assert len(ctx.session_events) == 2
+        assert ctx.text_segment == []
+        assert ctx.turn_usage == {"prompt": 0, "completion": 0, "cache_hit": None, "cache_miss": None}
+
+    def test_multi_turn_accumulation(self) -> None:
+        """多轮累积：轮 1 落账 → begin_turn → 轮 2 落账，全会话缓冲线性增长。"""
+        ctx = make_fake_ctx()
+        on_event = cli.make_on_event(ctx, ws=None, thinking=None)
+        on_event("mode_changed", MODE_PAYLOAD)
+        commands.begin_turn(ctx)
+        on_event("compressed", {"stage": "L1", "ok": True})
+        events = [event for event, _ in ctx.session_events]
+        assert events == ["mode_changed", "compressed"]
+
+
+def _clear_context(tmp_path) -> SimpleNamespace:
+    """_cmd_clear / _cmd_resume 所需的最小 ctx。"""
+    ctx = make_fake_ctx()
+    ctx.workspace = tmp_path
+    ctx.system_prompt = "sp"
+    ctx.config = SimpleNamespace(memory_top_n=5, context_limit=128_000, read_only_extra=[])
+    ctx.skills = SimpleNamespace(scan=lambda: None, index_text=lambda: "", warnings=[])
+    ctx.memory_store = SimpleNamespace(load_injection=lambda n: "")
+    ctx.history = SimpleNamespace(view=lambda: [])
+    ctx.state = SimpleNamespace(mode="plan", approval_policy="per-action")
+    return ctx
+
+
+class TestSessionBufferReset:
+    """会话缓冲重置点收窄（§4.3）：仅 /clear 与 /resume 清空。"""
+
+    @pytest.mark.asyncio
+    async def test_clear_resets_session_buffer(self, tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+        ctx = _clear_context(tmp_path)
+        ctx.session_events.append(("mode_changed", MODE_PAYLOAD))
+        ctx.text_segment.append("残段")
+        monkeypatch.setattr(cli, "rebuild_loop", lambda ctx, thinking=None: None)
+        monkeypatch.setattr("glaucous.extensions.rules.load_rules", lambda ws: "")
+        monkeypatch.setattr("glaucous.ui.prompts.build_system_prompt", lambda *a, **k: "sp")
+        monkeypatch.setattr(commands, "History", SimpleNamespace(create=lambda sp, ws: SimpleNamespace(view=lambda: [])))
+        assert await commands.handle_command("/clear", ctx) is True
+        assert ctx.session_events == []
+        assert ctx.text_segment == []
+
+    @pytest.mark.asyncio
+    async def test_resume_resets_session_buffer(self, tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+        ctx = _clear_context(tmp_path)
+        ctx.session_events.append(("mode_changed", MODE_PAYLOAD))
+        monkeypatch.setattr(cli, "rebuild_loop", lambda ctx, thinking=None: None)
+        monkeypatch.setattr(cli, "resume_history", lambda ws, rid, sp, renderer: (SimpleNamespace(view=lambda: []), commands.SessionState()))
+        assert await commands.handle_command("/resume", ctx) is True
+        assert ctx.session_events == []
 
 
 class TestExpand:
@@ -108,20 +266,27 @@ class TestExpand:
         assert any("暂无可展开的思考过程" in note for note in ctx.renderer.notes)
 
     @pytest.mark.asyncio
-    async def test_replay_buffer_with_header(self) -> None:
-        """间隙回看：分隔头 + 交互伪事件摘要逐条重放（仅读不改状态）。"""
+    async def test_replay_full_session(self) -> None:
+        """全会话重放（§4.1）：分隔头「本会话」+ 伪事件摘要 + 正文段全文 + 工具结果全量。"""
         ctx = make_fake_ctx()
-        ctx.turn_events.append(("ask", {"summary": "提问「用哪个库」→ 回答：rich"}))
+        ctx.session_events.append(("ask", {"summary": "提问「用哪个库」→ 回答：rich"}))
+        ctx.session_events.append(("text_segment", {"text": "第一步：先看目录结构\n第二步：定位入口"}))
+        ctx.session_events.append(("tool_end", {
+            "call": SimpleNamespace(name="list_dir", arguments="{}"),
+            "result": SimpleNamespace(ok=True, content="line1\nline2\nline3"),
+        }))
         await commands._cmd_expand(ctx)
         joined = "\n".join(ctx.renderer.notes)
-        assert "思考过程（上一轮）" in joined
+        assert "思考过程（本会话）" in joined  # 语义变更：全会话而非上一轮
         assert "提问「用哪个库」→ 回答：rich" in joined
-        assert len(ctx.turn_events) == 1  # 只读：缓冲不受影响
+        assert "中间步正文" in joined and "第二步：定位入口" in joined
+        assert "line3" in joined  # 工具结果全量重放（不受摘要行数限制）
+        assert len(ctx.session_events) == 3  # 只读：缓冲不受影响
 
 
 class TestCollapseSwitch:
     def test_off_env_disables(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """GLAUCOUS_COLLAPSE=off：即使 TTY 也不开折叠（§3.1 开关语义）。"""
+        """GLAUCOUS_COLLAPSE=off：即使 TTY 也不开折叠（§4.5 开关语义）。"""
         monkeypatch.setenv("GLAUCOUS_COLLAPSE", "off")
         monkeypatch.setattr(sys.stdout, "isatty", lambda: True, raising=False)
         assert cli._collapse_enabled() is False
