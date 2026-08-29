@@ -1174,11 +1174,17 @@ def make_prompt_session(workspace: Path, model_names: Callable[[], list[str]] | 
             key_bindings=kb,
         )
 
-        # 默认选中第一条（§1.1）：候选刷新后无选中项时自动选第一候选（仅高亮）
-        def _select_first(event) -> None:
-            state = event.completion_state
+        # 默认选中第一条（§1.1）：候选刷新后无选中项时自动选第一候选。
+        # 实现（r1-B1 修复）：直接设置 complete_index = 0——①Buffer 的
+        # on_completions_changed 回调实参无 completion_state 属性（读 buffer 闭包）；
+        # ②complete_next() 存在候选文本落入输入行的风险，违反「仅高亮不落文本」。
+        # 置位后重发 on_completions_changed 通知渲染层刷新（index 已非 None，无递归）。
+        def _select_first(_event=None) -> None:
+            buffer = session.default_buffer
+            state = buffer.complete_state
             if state and state.completions and state.complete_index is None:
-                session.default_buffer.complete_next()
+                state.complete_index = 0
+                buffer.on_completions_changed()
 
         session.default_buffer.on_completions_changed += _select_first
         return session
@@ -1197,6 +1203,16 @@ def _collapse_enabled() -> bool:
     关闭/管道时不开 Live：事件维持现状逐条实时打印；会话缓冲仍记录（/expand 可用）。
     """
     return sys.stdout.isatty() and os.environ.get("GLAUCOUS_COLLAPSE", "").strip().lower() != "off"
+
+
+def consume_pending_task(ctx: ReplContext) -> str | None:
+    """消费 /skill 组装的待执行任务（F3）：取出并置 None，仅驱动一次（当次生效）。
+
+    独立函数便于单测覆盖「repl 消费后置 None」（spec §五）；repl 斜杠分派后
+    检查 pending_task 非空 → 取出落入任务轮（与用户输入任务同一入口）。
+    """
+    task, ctx.pending_task = ctx.pending_task, None
+    return task
 
 
 async def repl(workspace: Path, resume_id: str | None) -> None:
@@ -1321,7 +1337,7 @@ async def repl(workspace: Path, resume_id: str | None) -> None:
             if not ctx.pending_task:
                 continue
             # F3：/skill 组装的任务立即执行一轮（与用户输入任务同一入口），当次生效
-            task, ctx.pending_task = ctx.pending_task, None
+            task = consume_pending_task(ctx)
         # 任务轮开始：轮级重置（F4 §4.3 begin_turn：清 turn_usage 与正文段缓冲，
         # 不动会话缓冲；session_events 仅 /clear、/resume 清空，/expand 回看全会话）
         begin_turn(ctx)
@@ -1358,11 +1374,11 @@ async def repl(workspace: Path, resume_id: str | None) -> None:
                     console.print(body, soft_wrap=True, markup=False, emoji=False)
                     if session is not None:
                         render_answer_card(body)
-                elif answer and ctx.stream_state["printed"]:
-                    # 降级/管道轮：正文已逐字直接打印，仅补收尾换行与卡片（TTY）
+                elif ctx.stream_state["printed"]:
+                    # 降级/管道轮（r1-B2 修复）：正文已逐字直打，仅补收尾换行；
+                    # 不渲染卡片、不重复输出（§4.5：轮末仅用量行）。
+                    # 诊断轮（_terminate）缓冲空且无 text 事件，自然跳过（§4.4 步骤 2）
                     console.print()
-                    if answer.strip() and session is not None:
-                        render_answer_card(answer)
             else:
                 # §4.4 步骤 5（B3）：异常轮正文段落账供 /expand 全会话，不呈现
                 flush_text_segment(ctx)

@@ -118,3 +118,10 @@
 > 3.3i prompt_toolkit 输入层完成（theme.py `PT_STYLE` + cli.py `PromptSession`，详见评审文档跟进四：docs/designs/202608311000-design-m3-day5-cli-console-migration.md）；B-04（`console.print` file 形参 TypeError）随接入当场修复，B-01/B-03/S-01/S-02 仍为待办。
 > 3.3i2 输入区布局收敛 + budget 占用并入头部完成（详见评审文档跟进五：docs/designs/202608311000-design-m3-day5-cli-console-migration.md）。
 > 3.3v /view 文件渲染完成（md 卡片 / 代码高亮 / 文本 / CSV 表格，agent 路径 .md 自动卡片化；两个方案存档 .glaucous/plans/20260829-160008 与 161209，详见评审文档跟进六）；/view 为 3.3 斜杠命令首个落地，其余斜杠命令与 Completer 补全、FR-31 状态栏仍待办。
+
+### v1.1 反馈修复批次（F1~F4）代码评审建议项（r1，见 docs/reviews/202608292334-code-review-v11-feedback-fixes-r1.md）
+
+- [ ] S1 make_on_event 的 ws 参数在 tool_end md 卡片删除后已无用途，后续可收窄签名（cli.py，需同步 rebuild_loop 与测试调用点）
+- [ ] S2 SkillRegistry.loaded_names() 在 F2 去加载态后产品侧零调用，可评估移除或标注保留理由（extensions/skills.py，M3 既有 API，不在本批范围内动）
+- [ ] S3 /skills 条目排版「名称 [来源] 描述」与 spec §二字面「[来源] 名称」不一致（要素完备，沿用前批排版，视觉验收时统一）
+- [ ] 范围裁剪偿还项（spec §〇）：FR-31 常驻状态栏；思考过程跨 /stop 落盘持久化（/resume 后思考缓冲空态）；/skill 的 Tab 参数补全

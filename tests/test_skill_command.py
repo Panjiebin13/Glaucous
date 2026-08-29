@@ -106,6 +106,29 @@ class TestSkillTextNoSideEffect:
         assert registry.loaded_names() == set()
 
 
+class TestPendingTaskConsumption:
+    """repl 消费链路（spec §五）：消费后置 None、仅驱动一次、当次生效不污染 system prompt。"""
+
+    def test_consume_returns_task_and_resets(self, registry: SkillRegistry) -> None:
+        from glaucous.cli import consume_pending_task
+
+        ctx = make_ctx(registry)
+        ctx.pending_task = "组装好的任务"
+        assert consume_pending_task(ctx) == "组装好的任务"
+        assert ctx.pending_task is None  # 消费后置 None：仅驱动一次
+        assert consume_pending_task(ctx) is None  # 二次消费无任务（不重复驱动）
+
+    @pytest.mark.asyncio
+    async def test_skill_command_does_not_touch_system_prompt(self, registry: SkillRegistry) -> None:
+        """当次生效（spec §3.2）：_cmd_skill 只写 pending_task，不注入 system prompt。"""
+        ctx = make_ctx(registry)
+        ctx.system_prompt = "原始系统提示词"
+        await _cmd_skill(ctx, "code-review")
+        assert ctx.system_prompt == "原始系统提示词"
+        assert SKILL_BODY not in ctx.system_prompt
+        assert SKILL_BODY in ctx.pending_task  # 技能正文仅在当轮任务文本中
+
+
 class TestSkillsListingNoLoadState:
     @pytest.mark.asyncio
     async def test_no_load_state_words(self, registry: SkillRegistry) -> None:
