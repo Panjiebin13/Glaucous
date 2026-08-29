@@ -5,7 +5,7 @@
 > 上游依据：docs/编程智能体需求文档.md（FR-08/10/11/26/27/28/30/31/33）、docs/编程智能体概要设计说明书.md §5/§6/§7/§8/§9/§10、docs/Glaucous开发计划表.md、docs/Glaucous天青夏日主题设计.md
 > 前置状态：M3 已合并（feature/m3-day5 ← M3-UI，评审 r4 通过），本批为 v1.1 开发前的产品化细节打磨
 > 决策记录（用户已确认）：skill 仅创建到项目工作区；思考折叠用 /expand 展开；md 渲染为流式结束后追加卡片；模型模板首次启动生成；缓存字段有则显示无则省略；附加项 A/B/C/D 全部纳入
-> 评审修复记录：spec-review（docs/reviews/202608291800-spec-review-v11-productization-polish.md）B1~B4/S1~S10 已全部吸收
+> 评审修复记录：spec-review（docs/reviews/202608291800-spec-review-v11-productization-polish.md）B1~B4/S1~S10 已全部吸收；r2 复审（docs/reviews/202608291800-spec-review-v11-productization-polish-r2.md）r2-B1/r2-B2/r2-S1~S4 已吸收
 
 ## 〇、目标与范围
 
@@ -84,16 +84,17 @@
 
 ## 三、R3 思考过程折叠 + /expand
 
-### 3.1 时序模型（B3 修复：不依赖「最终回答首个增量」判定，折叠时机后移至 stream_end）
+### 3.1 时序模型（B3/r2-B1/r2-S1 修复：文本分流矛盾消除，折叠与渲染均后移至轮末）
 
 既有事实：`stream_state` 仅 `{"printed": bool}`；loop 对**每次** LLM 响应（含带 tool_calls 的中间步正文）都发射 `text` 事件，流式期间无法预知当前 text 是否最终回答。因此：
 
 - **`agent/loop.py` 新增事件**：`run` 循环中命中「无 tool_calls → 返回」分支（最终回答确定）时，在 `return` 前发射 `self._on_event("stream_end", {})`。这是本轮**唯一**的 loop 改动；
-- **TTY 且折叠开启**（默认开启；`GLAUCOUS_COLLAPSE=off` 可关）：本轮 `stream_end` 之前的全部 on_event 事件不逐条直接打印，而是渲染进一个 `rich.live.Live` 动态区（高度上限 `THINKING_MAX_LINES = 8`，滚动显示最近事件 + 顶行计数「⚙ 思考中 · N 步」）；最终回答的流式增量（`text` 事件）照常逐字打印在 Live 区**下方**（Live 区占位上移，不互扰）；
-- **`stream_end` 到达**（本轮结束，含异常兜底路径后的补发约定见 3.4）：
+- **TTY 且折叠开启**（默认开启；`GLAUCOUS_COLLAPSE=off` 可关）：本轮 `run()` 返回前的**全部** on_event 事件（含 `text` 增量，不区分中间步与最终回答，矛盾自消）不逐条直接打印，而是渲染进一个 `rich.live.Live` 动态区（高度上限 `THINKING_MAX_LINES = 8`，滚动显示最近事件 + 顶行计数「⚙ 思考中 · N 步」；N = turn_events 中非 text 事件条数，text 增量不计步）；
+- **轮末渲染**（r2-S1 修复：发生在 `await ctx.loop.run(task)` 返回后，而非 stream_end 事件内——R7 数据源为 run 返回值，事件发射时不可得；stream_end 事件仅作为折叠区内容定格的信号）：
   1. `Live.update(摘要行)` 后 `Live.stop()` —— 思考区原地收缩为一行：`💭 思考过程（N 步 · ↑Xk ↓Yk tokens）— /expand 查看`（token 段取本轮 `turn_usage` 合计，无 usage 数据时省略 token 段）；
-  2. 按序执行 R7（md 卡片）、R5（用量行）渲染；
-  3. 清空 `ctx.turn_events` 与 `ctx.turn_usage`（调用 `commands.reset_turn_buffers(ctx)`）；
+  2. 打印完整最终回答全文（取 `run()` 返回值，一次性输出——TTY 下回答已在思考区内逐字可见，轮末全文重述保证与管道模式输出对齐）；
+  3. 按序执行 R7（md 卡片）、R5（用量行）渲染；
+  4. 清空 `ctx.turn_events` 与 `ctx.turn_usage`（调用 `commands.reset_turn_buffers(ctx)`）；
 - **/expand**：打印当前缓冲的全部事件（复用 `render_event` 逐条渲染，加「── 思考过程（本轮）──」分隔头）；缓冲为空提示「本轮暂无可展开的思考过程」；仅读缓冲，不影响状态。
 
 ### 3.2 阻塞交互与 Live 区的共存时序（B4 修复）
@@ -105,11 +106,11 @@
 - pause = `Live.stop()`（保留已渲染内容，交互输出正常打印），resume = `Live.start()` 恢复动态区；异常路径用 try/finally 保证 resume；
 - **事件缓冲范围**：`ReplContext` 新增 `turn_events: list = field(default_factory=list)` —— 记录两类条目：① on_event 的 `(event, payload)` 全量；② 交互伪事件 `("ask", {...})` / `("decision", {...})` / `("plan_decision", {...})`（回调内部记录，供 /expand 完整回看本轮人机交互）。
 
-### 3.3 降级与异常安全
+### 3.3 降级与异常安全（r2-B2 修复：异常路径清理责任归 repl 层，不依赖事件发射）
 
-- 非 TTY（管道/重定向）或 `GLAUCOUS_COLLAPSE=off` → 不开 Live，事件维持现状逐条实时打印；turn_events 仍记录（管道下 /expand 可用）；
+- 非 TTY（管道/重定向）或 `GLAUCOUS_COLLAPSE=off` → 不开 Live，事件维持现状逐条实时打印（含 text 增量）；turn_events 仍记录（管道下 /expand 可用）；
 - Live 启动失败（终端不支持）→ 降级为实时打印，本轮不再尝试；
-- `stream_end` 之外终止（预算熔断提前返回、异常兜底）：loop 的提前返回分支同样发射 `stream_end`（保证 cli 侧收缩/清理总被执行）；
+- **异常 raise 路径**（`LLMError`、Ctrl+C 中断从 loop 抛出、预算熔断外的其他异常）不经任何提前返回分支，`stream_end` 不会发射：轮末渲染/收缩/清理的**执行责任归 cli repl 层** —— repl 的 `try: answer = await ctx.loop.run(task)` 用 `finally` 统一执行 §3.1 步骤 1~4（Live 收缩；异常时跳过步骤 2/3 的回答与卡片渲染，用量行仍按已收集数据打印；缓冲清理总是执行），`stream_end` 事件不承诺在异常路径发射；
 - /clear、/resume：调用 `commands.reset_turn_buffers(ctx)` **显式**清空（S3 修复：ctx 为同一对象复用，字段不会随 rebuild_loop 自然重置）。
 
 ### 3.4 不变量
@@ -175,7 +176,8 @@ api_key_env = "GLAUCOUS_API_KEY"
 ### 5.2 累计与渲染（cli.py / commands.py；S2 修复：统一「本轮累计」口径）
 
 - `ReplContext` 新增 `turn_usage: dict = field(default_factory=...)`，结构 `{"prompt": 0, "completion": 0, "cache_hit": None, "cache_miss": None}`；cli 构造 `LLMClient` 时注入 `on_usage` 累加器：数字字段求和；`cache_hit`/`cache_miss` 首次收到非 None 值时由 None 转为 0 基线后再累加（全程 None 表示供应商无缓存数据）；
-- `stream_end` 渲染（顺序见 §3.1）：最终回答流式原文 → R7 md 卡片 → **用量行**：
+- **口径界定（r2-S2 修复）**：turn_usage 只累计**任务轮内**（`run()` 调用期间）的 usage；`/compact` 命令的压缩调用发生在轮间，其 LLM 用量经 on_usage 计入前立即忽略（实现：cli 在 /compact 调用期间临时置 `ctx.counting_usage = False` 门控，默认 True）；loop 内 L2 压缩发生在轮内，计入本轮口径（符合「本轮实际消耗」语义）；
+- **轮末渲染顺序**（与 §3.1 一致）：折叠摘要行 → 最终回答全文 → R7 md 卡片 → **用量行**：
   `⏱ ↑12.3k ↓456 tokens · 缓存命中 82%`
   - 数值格式：`<1000` 原样，`≥1000` 保留一位小数加 `k`；
   - 命中率 = `cache_hit / (cache_hit + cache_miss)`，四舍五入整数百分比；`cache_hit is None` 时该行只打到 `tokens` 为止（不显示缓存段）；
@@ -203,8 +205,8 @@ api_key_env = "GLAUCOUS_API_KEY"
 
 ### 6.2 选项集与接线（B1 修复：对齐既有三选项契约）
 
-- **审批卡**（`make_decision_callback`）：选项为既有三选项（概设 §5.3、FR-11）——「同意」「同意同类型」「拒绝」，映射 `ApprovalDecision.choice` 的 `approve` / `approve_type` / `reject`；选中「拒绝」后进入既有拒绝理由文本输入（含 B 项保护）；取消（Esc）= 拒绝、理由「用户取消」；
-- **方案卡**（`prompt_plan_decision`）：选项为既有一/二/三（FR-08、planning.CHOICE_*）——「执行（逐次审批）」「执行（自动批准）」「拒绝」；取消（Esc）= 选择三、理由「用户取消」；
+- **审批卡**（`make_decision_callback`）：选项为既有三选项（概设 §5.3、FR-11）——「同意」「同意同类型」「拒绝」，映射 `ApprovalDecision.choice` 的 `approve` / `approve_type` / `reject`；选中「拒绝」后进入既有拒绝理由文本输入（含 B 项保护）；取消（Esc）= 拒绝、理由「用户取消」；**DANGEROUS 呈现取舍（r2-S3 决策）**：卡片仍统一展示三选项（不另做 DANGEROUS 分列），安全语义由既有 `gate` 守卫兜底（DANGEROUS 不受同类型豁免，与现状一致），避免本轮扩改审批卡形态；
+- **方案卡**（`prompt_plan_decision`）：选项为既有一/二/三（FR-08、planning.CHOICE_*）——「执行（逐次审批）」「执行（自动批准）」「继续讨论一下」（第三项文案对齐 FR-08 字面，r2-S4 修复）；取消（Esc）= 选择三（继续讨论），`feedback` 置「用户取消」（r2-S4 修复：`PlanDecision` 无 reason 字段，用户取消意图统一落 `feedback`）；
 - **提问卡**（`make_ask_callback`）：options 非空（≤6，模型给定）→ 箭头选择，选中返回选项原文，取消返回 None（与现有「未响应」语义一致）；无 options → 维持现有文本输入；
 - 触发条件：TTY + 非纯文本降级 + options/选项数 ≥2；否则走现有数字输入卡；
 - 数字输入回退路径的所有既有行为（越界回喂、空回答处理）保持不变。
@@ -252,7 +254,7 @@ api_key_env = "GLAUCOUS_API_KEY"
 
 1. `test_usage_event.py`：mock 流式 chunk（含 usage chunk）→ usage payload 归一化（DeepSeek 字段 / OpenAI details 字段 / 无 usage 不回调）；`stream_options` 降级重试（首次参数报错 → 去参重试成功）；
 2. `test_assets.py`（S9 归属）：`models.toml.example` 可被 tomllib 解析且两档案字段齐全、无 api_key 明文；`create-skill/SKILL.md` frontmatter 可被 `_parse_frontmatter` 解析、name 与目录名一致；模板缺失时生成到 tmp HOME、已存在不覆盖、模板损坏回退 env 兜底、生成后 `load_registry` 解析出两档案；
-3. `test_turn_collapse.py`：turn_events 缓冲记录（含交互伪事件）、`reset_turn_buffers` 清理时机、/expand 空缓冲提示、`GLAUCOUS_COLLAPSE=off` 行为；
+3. `test_turn_collapse.py`：turn_events 缓冲记录（含交互伪事件；text 增量不计入 N 步）、`reset_turn_buffers` 清理时机、/expand 空缓冲提示、`GLAUCOUS_COLLAPSE=off` 行为、异常路径下 repl finally 清理仍执行（mock run 抛错断言缓冲已清）；
 4. `test_repl_completer.py`：命令段补全（/ 触发、/vi 过滤、meta 取自 COMMAND_META）、路径段补全（候选含目录后缀 /、排除目录、异常静默）、其他段无候选；
 5. `test_arrow_select.py`：`select_with_arrows` 注入伪按键序列（↑↓ 移动、Enter 返回索引、Esc 返回 None、循环移动边界）；
 6. `test_answer_card.py`（S9 归属）：`render_answer_card` 卡片内容含标题与正文、空文本不渲染；管道/非 TTY 下 cli 不触发卡片（以渲染函数单测 + 触发条件断言覆盖）；
