@@ -188,6 +188,20 @@ def render_csv_doc(title: str, text: str) -> None:
     console.print(table)
 
 
+def render_answer_card(text: str) -> None:
+    """最终回答 Markdown 卡片（v1.1 打磨 R7）：流式结束后追加渲染完整回答。
+
+    与方案卡、/view markdown 卡同源：make_card + rich Markdown（markdown.* 色板）。
+    空文本/纯空白不渲染；触发条件由调用方判定（TTY 且回答非空）。
+    偏离登记（S5）：概设 §8.4「正文不套面板」，此卡片为用户明确决策的产品化呈现。
+    """
+    if not text or not text.strip():
+        return
+    table = make_card("🕊 回答")
+    table.add_row(Markdown(text))
+    console.print(table)
+
+
 def _lexer_for(path: Path) -> str:
     """按扩展名选 pygments lexer：Syntax.from_path 失败时回退 text。"""
     try:

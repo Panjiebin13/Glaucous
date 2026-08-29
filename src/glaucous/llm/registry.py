@@ -49,6 +49,27 @@ def models_toml_path() -> Path:
     return Path.home() / ".glaucous" / "models.toml"
 
 
+def ensure_models_toml() -> None:
+    """首次启动从包内模板生成 models.toml（v1.1 打磨 R4）。
+
+    - 文件已存在 → 绝不覆盖、绝不修改；
+    - 模板读取/写入任何失败（打包形态异常、权限）→ 静默返回，
+      由 load_registry 走既有 env 单档案兜底，绝不阻断启动。
+    """
+    path = models_toml_path()
+    if path.exists():
+        return
+    try:
+        from importlib.resources import files
+
+        template = Path(str(files("glaucous").joinpath("assets/models.toml.example")))
+        content = template.read_text(encoding="utf-8")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+    except Exception:  # noqa: BLE001 —— 契约：任何失败静默回退，不阻断启动
+        return
+
+
 def load_registry(env: dict[str, str] | None = None) -> tuple[dict[str, ModelEntry], str]:
     """加载注册表，返回（档案表, 默认档案名）。
 
@@ -56,6 +77,10 @@ def load_registry(env: dict[str, str] | None = None) -> tuple[dict[str, ModelEnt
     """
     source = os.environ if env is None else env
     path = models_toml_path()
+    if not path.exists():
+        # 首次启动生成（R4）：在文件缺失分支之前尝试从模板生成；任何失败静默返回，
+        # 下方二次检查仍缺失时走 env 兜底
+        ensure_models_toml()
     if not path.exists():
         return _env_fallback(source), ENV_PROFILE_NAME
     try:

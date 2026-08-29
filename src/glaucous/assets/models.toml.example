@@ -1,0 +1,13 @@
+# Glaucous 模型注册表（密钥零存储：只写环境变量名，绝不写密钥本身）
+# 使用前请先 export 对应环境变量，例如：export GLAUCOUS_API_KEY=sk-****
+# 默认档案为文件中的第一个段；可用环境变量 GLAUCOUS_DEFAULT_MODEL 指定其他段名。
+
+[models.deepseek-v4-flash]
+base_url = "https://api.deepseek.com"
+model = "deepseek-v4-flash"
+api_key_env = "GLAUCOUS_API_KEY"
+
+[models.deepseek-v4-pro]
+base_url = "https://api.deepseek.com"
+model = "deepseek-v4-pro"
+api_key_env = "GLAUCOUS_API_KEY"

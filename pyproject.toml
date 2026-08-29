@@ -15,7 +15,7 @@ dependencies = [
     # 重试/退避/流式 tool-call 拼装/解析容错均自研（概设 §3）
     "openai>=1.40,<2",
     # rich：CLI 主题渲染（M3，theme.py/cli.py 依赖；此前漏声明，干净环境启动即崩）
-    "rich>=13.7",
+    "rich>=13.7,<14",
     # prompt_toolkit：输入层（M3 3.3，theme.py PT_STYLE 与 rich 共用色板）
     "prompt_toolkit>=3.0,<4",
 ]
@@ -33,8 +33,8 @@ glaucous = "glaucous.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-# 内置示例 skill（M3 任务 3.5，随包分发；Day5 Plan §4.5）
-"glaucous" = ["assets/skills/*/SKILL.md"]
+# 内置示例 skill（M3 任务 3.5，随包分发；Day5 Plan §4.5）+ 模型注册表模板（v1.1 打磨 R4）
+"glaucous" = ["assets/skills/*/SKILL.md", "assets/*.toml.example"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
