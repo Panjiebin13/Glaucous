@@ -18,5 +18,9 @@ __pycache__/
 build/
 dist/
 .venv/
+.venv-win/
 venv/
 .pytest_cache/
+
+# 临时测试脚本（rich console.input 演示）
+1.py

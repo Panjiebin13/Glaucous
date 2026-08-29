@@ -60,6 +60,9 @@
 > 上下文压缩管线（L1/L2/锚替换/预算终止）为纯内存变换，会话 JSONL 保留全量原文（resume 后重新裁剪）。
 
 ### Day 5 / M3 体验与扩展（8/31）
+> 注：本节 3.1/3.2/3.3/3.7 的 UI 实现已由 M3-UI 分支替换（见下节「M3 CLI 主题渲染」，UI 以该节为准），
+> 依赖声明以 M3-UI 侧为准；功能条目（3.4~3.6、3.8 及评审建议项）保留不变。
+
 
 - [x] 3.1 theme.py 色板 + rich Theme 接入 + 终端降级（FR-30）
 - [x] 3.2 渲染规范：⏺/⎿ 工具行、四类卡片、状态栏、Banner、意象图标（FR-30）
@@ -84,3 +87,26 @@
 
 - [ ] r2-S1 theme.py VT 启用借 os.system("") 隐式依赖 cmd.exe，后续可改 ctypes.SetConsoleMode 显式置位并包裹异常（健壮性增强）
 - [ ] r2-S2 VT 启用行为未同步入 spec §4.1 字面，后续修订补述；M4 偿还 test_theme_render 时增加 win32 TTY 分支的 mock 断言
+
+### Day 5 / M3 CLI 主题渲染（8/31）
+
+- [x] 3.1 theme.py 色板 + rich Theme 接入（cli.py 全量 console.print/console.input 化：色板单一出口、动态内容统一 escape、流式正文逐字保真、手写 ANSI 门控 `_ANSI`/`import os` 清除）（FR-30）
+- [x] 3.2 渲染规范：三张交互卡改 rich Table（theme.py `make_card` 单一出口：ROUND 圆角框、框内标题栏+分隔线、边框海盐青/标题天青/键名天青；审批卡键值两列「需要确认/命令/风险」、方案/提问卡标题栏+正文行）；事件行语义色（诊断晚霞橙/模式切换天青/工具名亮青/成功海草绿/失败陶土红）、提示符/恢复行/错误出口同步主题化；状态栏、意象图标待补（FR-30）
+- [x] 3.2m Markdown 渲染接入：theme.py 定义 `markdown.*` 主题样式（标题天青/正文与加粗海鸥白/行内代码与引用海盐青/链接亮青/弱化晴空灰/列表圆点天青）；方案卡正文与提问卡 question 改 `Markdown()` 渲染——rich Markdown 不解析 console markup，方括号天然防注入，替代逐行 escape；流式终答保持纯文本（整块渲染与逐 token 流式冲突）；审批 detail diff/工具输出刻意不用（`-`/`+` 行会被解析成列表）
+- [ ] 3.3 斜杠命令 + PromptSession 补全（/plan /build /compact /clear /resume /model /memory /rules /skills /stop）（FR-31）——输入层已完成，见 3.3i；FR-31 常驻状态栏可用 PT `bottom_toolbar` 承载（/view 已先落地，见 3.3v）
+- [x] 3.3i prompt_toolkit 输入层接入：theme.py `PT_STYLE`（与 rich THEME 同一组色板常量派生、类名即语义名，带点号类名 `class:glaucous.title` 实测可解析，色板单一出口延伸到输入层）+ cli.py 主输入 `PromptSession`（`prompt_async` 接 asyncio 循环、↑↓ 历史 + Ctrl+R 搜索、`FileHistory` 持久化 `.glaucous/input_history` 跨会话可用、打不开文件退回内存历史）；`prompt_symbol` 返回值改 prompt_toolkit HTML（提示符随输入行归 PT 渲染，rich markup 方括号会被 PT 字面打印），拆 `prompt_mode()` 供非交互分支拼纯文本，模型名晴空灰弱化并列模式后（`🌊 plan · deepseek-v4-flash > `，读 `config.profile.model`，3.4 /model 后动态跟随）；非 tty（管道/重定向）回退 `console.input`，TODO 1.8 cp936 净化路径不变；顺手修 B-04：三处 `console.print(file=sys.stderr)` 传 rich 不支持的形参，「配置错误/本轮执行失败/工作区不存在」兜底路径触发即 TypeError 自崩（配置缺失实测复现），去掉 file 形参走主题 Console。验证：65 用例全绿 + 管道/pty 双端到端（pty 实测 PT 路径模型名/天青加粗语义色命中、/exit 契约、退出码 0）
+- [x] 3.3i2 输入区布局收敛：删独立模式行与 ❯ 前缀，模式段并入输入行前缀（tty 走 prompt_toolkit HTML `<glaucous.title>🌊 plan > </glaucous.title>` 天青加粗，管道回退拼纯文本 `🌊 plan > `，build·每次审批/auto 随 state 每轮动态重算）；模型/ctx 行顶格（去 2 空格缩进）；对话末尾 budget 占用条渲染删除，占用信息并入头部模型行（`deepseek-v4-flash  ○ 48k/128k tokens`——ctx_ring 圆环三档变色保留承载档位、百分比数字删除、token 用量接圆环后），render_prompt_header 签名 percent → `BudgetReport`（build_report 直传，单一数据源）。验证：68 用例全绿（65 基线 + tests/test_compression_event.py 压缩意象事件 3 用例）+ 管道/pty 双端到端（管道回退 `🌊 plan > ` 前缀 + 退出码 0；pty 实测前缀天青加粗 ANSI `0;38;5;73;1m`、无 `❯`、/exit 告别正常）
+- [x] 3.3v /view 文件渲染（3.3 斜杠命令首个落地）——`/view <路径>` 按后缀注册表（`_VIEW_RENDERERS`，27 后缀 → 四类）分发渲染：md→方案卡式 Markdown 卡片 / 代码→pygments 语法高亮（rich Syntax，不进卡片容器）/ txt·log→卡片原文 / csv·tsv→表格分列；共用防线：ws.check() 沙箱校验 + NUL 字节二进制检测（防伪装后缀）+ UTF-8 解码 + `MD_RENDER_MAX_LINES=200` 行数守卫；agent 路径 read_file 打开 .md 自动渲染卡片（非 md 维持默认摘要）
+- [ ] 3.4 models.toml 注册表 + /model 切换 + 连通性校验（FR-26/27）
+- [ ] 3.5 skill 扫描 + 索引注入 + load_skill 惰性加载 + 2 个内置示例（FR-28）
+- [ ] 3.6 /init 生成 glaucous.md 草稿（FR-23）
+- [ ] 3.7 终端降级（truecolor/256/16 色）（FR-30）
+- [ ] 3.2r cli.py AI review 修复项：审批「拒绝理由」EOF/Ctrl+C 保护（B-01）、删 risk_icons 空 dict（B-03）、render_event state 形参（S-01）、ask_user 越界序号重问（S-02）
+
+> 3.1 已完成并经 AI review（评审文档：docs/designs/202608311000-design-m3-day5-cli-console-migration.md，65 用例基线全绿）；
+> 3.2 三张交互卡已完成 rich Table 化（评审 S-03/S-04 关闭），B-02（action.target escape）随卡片化保留修复；
+> emoji 意象已对齐主题设计并核对 docs/rich_emoji.txt（Banner ☁、提问卡 🕊 想请教你；`:sunrise:`/`:sunset:` 不在 rich 表，恢复行保留字面 🌅）；B-01/B-03/S-01/S-02 仍为待办。
+> 3.2m Markdown 接入完成（theme.py `markdown.*` 样式 + 方案卡/提问卡正文 `Markdown()` 化，65 用例基线全绿）。
+> 3.3i prompt_toolkit 输入层完成（theme.py `PT_STYLE` + cli.py `PromptSession`，详见评审文档跟进四：docs/designs/202608311000-design-m3-day5-cli-console-migration.md）；B-04（`console.print` file 形参 TypeError）随接入当场修复，B-01/B-03/S-01/S-02 仍为待办。
+> 3.3i2 输入区布局收敛 + budget 占用并入头部完成（详见评审文档跟进五：docs/designs/202608311000-design-m3-day5-cli-console-migration.md）。
+> 3.3v /view 文件渲染完成（md 卡片 / 代码高亮 / 文本 / CSV 表格，agent 路径 .md 自动卡片化；两个方案存档 .glaucous/plans/20260829-160008 与 161209，详见评审文档跟进六）；/view 为 3.3 斜杠命令首个落地，其余斜杠命令与 Completer 补全、FR-31 状态栏仍待办。
