@@ -84,19 +84,18 @@
 
 ## 三、R3 思考过程折叠 + /expand
 
-### 3.1 时序模型（B3/r2-B1/r2-S1 修复 + r3-B1/S2 修复：思考区只收纳非 text 事件，text 增量维持现状逐字实时显示，无全文重述）
+### 3.1 时序模型（B3/r2-B1/r2-S1/r3-B1/r4-B1/r4-B2 修复：思考区只收纳非 text 事件；无 stream_end 新事件；缓冲跨轮保留供回看）
 
-既有事实：`stream_state` 仅 `{"printed": bool}`；loop 对**每次** LLM 响应（含带 tool_calls 的中间步正文）都发射 `text` 事件，流式期间无法预知当前 text 是否最终回答。因此文本流**不参与分流判定**：
+既有事实：`stream_state` 仅 `{"printed": bool}`；loop 对**每次** LLM 响应（含带 tool_calls 的中间步正文）都发射 `text` 事件，流式期间无法预知当前 text 是否最终回答。因此文本流**不参与分流判定**；折叠/收缩/清理全部由 cli repl 层在轮末（`run()` 返回后 `finally`）执行，**不新增任何 loop 事件**（r4 复审：原 stream_end 事件在轮末锚定后已无消费方，删除，loop 零改动）：
 
-- **`agent/loop.py` 新增事件**：`run` 循环中命中「无 tool_calls → 返回」分支（最终回答确定）时，在 `return` 前发射 `self._on_event("stream_end", {})`。这是本轮**唯一**的 loop 改动（仅作为折叠区内容定格的信号，不承担渲染职责）；
 - **TTY 且折叠开启**（默认开启；`GLAUCOUS_COLLAPSE=off` 可关）：
   - **`text` 增量（含中间步与最终回答）：维持现状逐字实时打印，不进思考区**（与用户「流式结束后追加卡片」决策一致，无重复呈现）；
-  - **非 text 事件**（tool_start/tool_end/budget/compressed/模式切换等）不逐条直接打印，而是渲染进一个 `rich.live.Live` 动态区（高度上限 `THINKING_MAX_LINES = 8`，滚动显示最近事件 + 顶行计数「⚙ 思考中 · N 步」；N = 已收纳的非 text 事件条数）；
-- **轮末渲染**（r2-S1 修复：发生在 `await ctx.loop.run(task)` 返回后的 `finally`，而非 stream_end 事件内）：
-  1. `Live.update(摘要行)` 后 `Live.stop()` —— 思考区原地收缩为一行：`💭 思考过程（N 步 · ↑Xk ↓Yk tokens）— /expand 查看`（token 段取本轮 `turn_usage` 合计，无 usage 数据时省略 token 段）；
+  - **非 text 事件**（tool_start/tool_end/budget/compressed/模式切换等）与交互伪事件不逐条直接打印，而是渲染进一个 `rich.live.Live` 动态区（高度上限 `THINKING_MAX_LINES = 8`，滚动显示最近事件 + 顶行计数「⚙ 思考中 · N 步」；**N = 思考区已收纳条目总数 = 非 text 事件 + 交互伪事件**，与缓冲、/expand、§3.4 同一口径，r4-B1 修复）；
+- **轮末渲染**（发生在 `await ctx.loop.run(task)` 返回后的 `finally`）：
+  1. `Live.update(摘要行)` 后 `Live.stop()` —— 思考区原地收缩为一行：`💭 思考过程（N 步 · ↑Xk ↓Yk tokens）— /expand 查看`（token 段取本轮 `turn_usage` 合计，无 usage 数据时省略 token 段；提示有效——缓冲保留至下一轮开始，间隙内 /expand 可回看，见步骤 3 与 3.3）；
   2. 按序执行 R7（md 卡片，追加在流式回答之后）、R5（用量行）渲染；
-  3. 清空 `ctx.turn_events` 与 `ctx.turn_usage`（调用 `commands.reset_turn_buffers(ctx)`）；
-- **/expand**：打印当前缓冲的全部条目（复用 `render_event` 逐条渲染，加「── 思考过程（本轮）──」分隔头）；缓冲为空提示「本轮暂无可展开的思考过程」；仅读缓冲，不影响状态。
+  3. 缓冲**不在轮末清空**（r4-B2 修复）：`turn_events`/`turn_usage` 保留为「上一轮」数据，直到**下一轮任务开始**时由 repl 清空重置（用户在本轮结束至下一轮输入之间可 /expand 回看）；
+- **/expand**：打印当前缓冲（最近一轮）的全部条目（复用 `render_event` 逐条渲染，加「── 思考过程（上一轮）──」分隔头）；折叠开/关两种模式的缓冲都保留至下一轮开始，间隙内均可回看；缓冲为空（启动后首轮未跑任务、或已开启下一轮）提示「暂无可展开的思考过程」；仅读缓冲，不影响状态。
 
 ### 3.2 阻塞交互与 Live 区的共存时序（B4 修复）
 
@@ -105,19 +104,19 @@
 - `ReplContext` 新增 `live_hooks: dict`（含 `pause: Callable[[], None]` / `resume: Callable[[], None]`），由 repl 启动时按折叠模式注入真实实现（折叠关闭/管道时为 no-op 空函数）；
 - 四个阻塞点进入前调 `ctx.live_hooks["pause"]()`、返回后调 `resume()`：`make_ask_callback.ask`、`make_decision_callback.decide`（含拒绝理由输入）、`prompt_plan_decision`、`ThemeRenderer.retry`；
 - pause = `Live.stop()`（保留已渲染内容，交互输出正常打印），resume = `Live.start()` 恢复动态区；异常路径用 try/finally 保证 resume；
-- **事件缓冲范围**：`ReplContext` 新增 `turn_events: list = field(default_factory=list)` —— 记录两类条目：① 非 text 的 on_event 事件 `(event, payload)`（text 增量不缓冲，与思考区收纳范围一致）；② 交互伪事件 `("ask", {...})` / `("decision", {...})` / `("plan_decision", {...})`（回调内部记录，供 /expand 完整回看本轮人机交互）。
+- **事件缓冲范围**：`ReplContext` 新增 `turn_events: list = field(default_factory=list)`（语义：最近一轮的缓冲，轮末保留、下轮开始时重置）—— 记录两类条目：① 非 text 的 on_event 事件 `(event, payload)`（text 增量不缓冲，与思考区收纳范围一致）；② 交互伪事件 `("ask", {...})` / `("decision", {...})` / `("plan_decision", {...})`（回调内部记录，供 /expand 完整回看人机交互）。
 
 ### 3.3 降级与异常安全（r2-B2 修复：异常路径清理责任归 repl 层，不依赖事件发射）
 
 - 非 TTY（管道/重定向）或 `GLAUCOUS_COLLAPSE=off` → 不开 Live，事件维持现状逐条实时打印（含 text 增量）；turn_events 仍记录（管道下 /expand 可用）；
 - Live 启动失败（终端不支持）→ 降级为实时打印，本轮不再尝试；
-- **异常 raise 路径**（`LLMError`、Ctrl+C 中断从 loop 抛出、预算熔断外的其他异常）不经任何提前返回分支，`stream_end` 不会发射：轮末渲染/收缩/清理的**执行责任归 cli repl 层** —— repl 的 `try: answer = await ctx.loop.run(task)` 用 `finally` 统一执行 §3.1 步骤 1~3（Live 收缩；异常时跳过步骤 2 的卡片渲染，用量行仍按已收集数据打印且遵循 §5.3 无数据抑制规则；缓冲清理总是执行），`stream_end` 事件不承诺在异常路径发射；
-- /clear、/resume：调用 `commands.reset_turn_buffers(ctx)` **显式**清空（S3 修复：ctx 为同一对象复用，字段不会随 rebuild_loop 自然重置）。
+- **异常 raise 路径**（`LLMError`、Ctrl+C 中断从 loop 抛出、预算熔断外的其他异常）：轮末渲染/收缩的**执行责任归 cli repl 层** —— repl 的 `try: answer = await ctx.loop.run(task)` 用 `finally` 统一执行 §3.1 步骤 1~3（Live 收缩；异常时跳过步骤 2 的卡片渲染，用量行仍按已收集数据打印且遵循 §5.3 无数据抑制规则；缓冲按步骤 3 保留供回看）；
+- **缓冲重置时机（r4-B2）**：每轮任务开始时（repl 拿到非斜杠输入、调 `run()` 之前）调 `commands.reset_turn_buffers(ctx)` 清空上一轮缓冲；/clear、/resume 也显式调用（S3 修复：ctx 为同一对象复用，字段不会随 rebuild_loop 自然重置）。
 
-### 3.4 不变量（r3-B1 修复：口径统一后自然成立）
+### 3.4 不变量（r3-B1/r4-B1 修复：口径统一后自然成立）
 
 - 折叠只改变**呈现**，不改变事件语义：审计、预算、历史消息均不受影响；text 增量在折叠开/关两种模式下输出内容完全一致（逐字保真）；
-- 摘要行的 N 与 /expand 打印条数一致（两者同为「非 text 事件 + 交互伪事件」口径）。
+- 摘要行的 N 与缓冲条目数一致（两者同为「非 text 事件 + 交互伪事件」口径；/expand 在下一轮开始前可打印该缓冲）。
 
 ## 四、R4 模型注册表内置模板
 
@@ -239,7 +238,7 @@ api_key_env = "GLAUCOUS_API_KEY"
 |---|---|---|
 | R1 | src/glaucous/assets/skills/create-skill/SKILL.md | 新增资产 |
 | R2 | src/glaucous/cli.py、src/glaucous/commands.py | 补全器新增、COMMAND_META 落 commands.py |
-| R3 | src/glaucous/agent/loop.py（stream_end 事件）、src/glaucous/cli.py、src/glaucous/commands.py（turn_events/live_hooks 字段、reset_turn_buffers、/expand 分派） | 折叠渲染、缓冲、新命令 |
+| R3 | src/glaucous/cli.py、src/glaucous/commands.py（turn_events/live_hooks 字段、reset_turn_buffers、/expand 分派；loop 零改动） | 折叠渲染、缓冲、新命令 |
 | R4 | src/glaucous/assets/models.toml.example、src/glaucous/llm/registry.py、pyproject.toml | 模板 + 生成逻辑 |
 | R5 | src/glaucous/llm/client.py（on_usage 注入）、src/glaucous/cli.py、src/glaucous/commands.py（turn_usage 字段） | usage 采集与渲染 |
 | R6 | src/glaucous/cli.py | 按键选择器 + 三处回调接线 |
@@ -255,7 +254,7 @@ api_key_env = "GLAUCOUS_API_KEY"
 
 1. `test_usage_event.py`：mock 流式 chunk（含 usage chunk）→ usage payload 归一化（DeepSeek 字段 / OpenAI details 字段 / 无 usage 不回调）；`stream_options` 降级重试（首次参数报错 → 去参重试成功）；
 2. `test_assets.py`（S9 归属）：`models.toml.example` 可被 tomllib 解析且两档案字段齐全、无 api_key 明文；`create-skill/SKILL.md` frontmatter 可被 `_parse_frontmatter` 解析、name 与目录名一致；模板缺失时生成到 tmp HOME、已存在不覆盖、模板损坏回退 env 兜底、生成后 `load_registry` 解析出两档案；
-3. `test_turn_collapse.py`：turn_events 缓冲记录（仅非 text 事件 + 交互伪事件；text 增量不缓冲）、`reset_turn_buffers` 清理时机、/expand 空缓冲提示、摘要行 N 与 /expand 条数一致性、`GLAUCOUS_COLLAPSE=off` 行为、异常路径下 repl finally 清理仍执行（mock run 抛错断言缓冲已清）；
+3. `test_turn_collapse.py`：turn_events 缓冲记录（仅非 text 事件 + 交互伪事件；text 增量不缓冲）、缓冲重置时机（下轮开始时清空而非轮末）、/expand 分支（间隙回看 / 空缓冲提示）、摘要行 N 与缓冲条目数一致性、`GLAUCOUS_COLLAPSE=off` 行为、异常路径下 repl finally 收缩仍执行（mock run 抛错断言缓冲保留）；
 4. `test_repl_completer.py`：命令段补全（/ 触发、/vi 过滤、meta 取自 COMMAND_META）、路径段补全（候选含目录后缀 /、排除目录、异常静默）、其他段无候选；
 5. `test_arrow_select.py`：`select_with_arrows` 注入伪按键序列（↑↓ 移动、Enter 返回索引、Esc 返回 None、循环移动边界）；
 6. `test_answer_card.py`（S9 归属）：`render_answer_card` 卡片内容含标题与正文、空文本不渲染；管道/非 TTY 下 cli 不触发卡片（以渲染函数单测 + 触发条件断言覆盖）；
@@ -267,7 +266,7 @@ api_key_env = "GLAUCOUS_API_KEY"
 
 1. 启动后 `/model` 列出两个档案；/help 含 /view 与 /expand；
 2. 键入 `/` 立即弹命令补全；`/view ` 弹文件补全；
-3. 发起一个会用工具的任务：思考区动态滚动 → 回答后收缩为摘要行 → `/expand` 回看（含交互记录）；
+3. 发起一个会用工具的任务：思考区动态滚动 → 回答后收缩为摘要行；在输入下一个任务前执行 `/expand` 可回看上一轮思考过程（含交互记录）；
 4. 每轮回答后出现 `⏱ ↑… ↓… tokens · 缓存命中 …`（供应商无缓存字段则无缓存段）；
 5. 提问/审批（三选项）/方案（三选一）卡 ↑↓ 选择；管道模式数字输入不回退；
 6. 最终回答下方出现 Markdown 渲染卡片；
