@@ -181,6 +181,16 @@ class AgentLoop:
             return None
         compactor.trim_history(self._history.messages)
         report = budget.build_report(self._history.view(), self._context_limit)
+        self._emit(
+            "compressed",
+            {
+                "stage": "L1",
+                "ok": True,
+                "used": report.used,
+                "limit": report.limit,
+                "percent": round(report.percent, 4),
+            },
+        )
         if report.level != "critical":
             self._l2_failures = 0  # L1 已把占用压回阈值内：非连续失败，清零
             return None
@@ -196,6 +206,16 @@ class AgentLoop:
                 keep_recent=max(1, L1_KEEP_RECENT_ROUNDS - self._l2_failures),
             )
         report = budget.build_report(self._history.view(), self._context_limit)
+        self._emit(
+            "compressed",
+            {
+                "stage": "L2",
+                "ok": compressed,
+                "used": report.used,
+                "limit": report.limit,
+                "percent": round(report.percent, 4),
+            },
+        )
         exhausted = report.percent >= 1.0
         # L2 反复失败且占用仍超阈值：继续重试只会每轮空转压缩调用（S-01/D12）
         l2_loop = (

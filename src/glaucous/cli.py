@@ -1,4 +1,4 @@
-"""简版 CLI：input 循环 + print 输出（Day 3：权限管线 + 审批三选项 + 审计）。
+"""简版 CLI：console 交互循环 + rich 主题输出（Day 3：权限管线 + 审批三选项 + 审计）。
 
 产出（计划表 0.8~1.6）：
 - 模式化提示符（🌊 plan > / 🌊 build >）；
@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import os
+import json
 import sys
 from pathlib import Path
 from typing import Any
@@ -20,13 +20,14 @@ from typing import Any
 from .agent.loop import AgentLoop
 from .agent.state import POLICY_AUTO_APPROVE, POLICY_PER_ACTION, SessionState
 from .config import ConfigError, load_config
+from .context.budget import BudgetReport, build_report
 from .context.history import History
 from .extensions.memory import MemoryStore
 from .extensions.rules import load_rules
 from .llm.client import LLMClient
 from .permission.approval import ApprovalAction, ApprovalDecision, ApprovalPipeline, AuditLog
 from .permission.risk import Risk
-from .permission.workspace import Workspace
+from .permission.workspace import Workspace, WorkspaceEscape
 from .tools.base import ToolRegistry
 from .tools.files import EditFileTool, ListDirTool, ReadFileTool, WriteFileTool
 from .tools.interactive import AskUserTool
@@ -44,14 +45,42 @@ from .tools.search import GrepTool
 from .tools.shell import BashTool
 from .ui.prompts import build_system_prompt
 
-BANNER = (
-    "☁ Glaucous · coding agent（M2 记忆与上下文）\n"
-    "雨过天青，海鸥滑翔，代码自有清凉\n"
-    "输入任务开始对话，/exit 退出。Plan 只读探索，Build 写操作走审批。"
+# 输入层（M3 3.3）：主输入 prompt_toolkit（↑↓ 历史/Ctrl+R 搜索/语义样式），
+# 渲染仍走 rich；非交互（管道/重定向）回退 console.input，保住 TODO 1.8 的
+# cp936 stdin 净化路径。提示符类名与 theme.PT_STYLE 语义名一一对应。
+from prompt_toolkit import PromptSession
+from prompt_toolkit.formatted_text import HTML
+from prompt_toolkit.history import FileHistory
+# rich 渲染：Console/色板单一出口（theme.py），动态内容一律 escape 防 markup 注入
+from rich.markup import escape
+from .theme import (
+    Markdown,
+    PT_STYLE,
+    console,
+    ctx_ring,
+    make_card,
+    render_code_doc,
+    render_csv_doc,
+    render_markdown_doc,
+    render_text_doc,
 )
 
+def render_banner() -> None:
+    """启动 Banner（主题设计 §2.1）：卡片化呈现，文案保持既有三行不变。
+
+    make_card 的框内标题栏即 §2.1 mockup 的 ┌─ 标题 ─┐ 形态；副标语走
+    glaucous.sub（海盐青斜体），操作提示走 glaucous.muted（晴空灰）。
+    """
+    table = make_card(":cloud: Glaucous · coding agent（M2 记忆与上下文）")
+    table.add_row("[glaucous.sub]雨过天青，海鸥滑翔，代码自有清凉[/]")
+    table.add_row("[glaucous.muted]输入任务开始对话，/exit 退出。Plan 只读探索，Build 写操作走审批。[/]")
+    console.print(table)
 # 结果摘要最多展示的行数（渐进披露：长输出只露尾部摘要，M3 折叠升级）
 RESULT_TAIL_LINES = 3
+
+# markdown 文档卡片渲染的行数上限：read_file 打开 .md 时，内容行数 ≤ 此值才
+# 渲染卡片（防长文档刷屏）；超长维持默认摘要并提示 /view 主动查看
+MD_RENDER_MAX_LINES = 200
 
 
 def sanitize_input(raw: str) -> str:
@@ -140,15 +169,18 @@ def make_ask_callback():
     """
 
     def ask(question: str, options: list[str]) -> str | None:
-        print("\n╭─ 🕊 请教 ─────────────────────────────────")
-        print(f"│  {question}")
+        console.print()
+        table = make_card(":dove: 想请教你")
+        # 问题正文走 Markdown（markdown.* 主题色板；方括号天然安全，无需 escape）
+        if question.strip():
+            table.add_row(Markdown(question))
         for i, option in enumerate(options, 1):
-            print(f"│  [{i}] {option}")
-        print("╰──────────────────────────────────────────")
+            table.add_row(f"[glaucous.title][{i}] {escape(option)}[/]")
+        console.print(table)
         try:
-            raw = sanitize_input(input("  回答（输入候选序号或自由文本）: ")).strip()
+            raw = sanitize_input(console.input("  [glaucous.sub]回答（输入候选序号或自由文本）: [/]")).strip()
         except (EOFError, KeyboardInterrupt):
-            print()
+            console.print()
             return None
         if raw.isdigit() and 1 <= int(raw) <= len(options):
             return options[int(raw) - 1]
@@ -160,58 +192,76 @@ def make_ask_callback():
 def make_decision_callback():
     """审批三选项决策回调（per-action 弹三选项；auto-approve 守卫在 gate 内先行处理）。
 
-    破坏性命令（DANGEROUS/区外写）用 ⚠ 警示 + 命令全文（M3 才 rich 主题，此处纯文本）。
+    破坏性命令（DANGEROUS/区外写）用 ⚠ 警示 + 命令全文（主题色渲染）。
     """
 
     def decide(action: ApprovalAction) -> ApprovalDecision:
+        risk_icons = {
+
+        }
         risk_note = {
-            Risk.DANGEROUS: " ⚠ 破坏性操作（不可批量放行）",
+            Risk.DANGEROUS: " :warning: 破坏性操作（不可批量放行）",
             Risk.WRITE: "",
             Risk.SAFE: "",
         }.get(action.risk, "")
-        print(f"\n  ⏺ 需要确认：{action.kind} {action.target}{risk_note}")
+        console.print()
+        table = make_card(key_value=True)
+        table.add_row(
+            "需要确认",
+            f"[glaucous.text][bold]{escape(str(action.kind))} {escape(str(action.target))}[/][/]",
+        )
+        if risk_note:
+            table.add_row("风险", f"[glaucous.warn]{risk_note}[/]")
+        console.print(table)
         if action.detail:
             # diff/说明可能多行，只展示前 60 行
             detail_lines = action.detail.splitlines()
-            print("\n".join(f"    {line}" for line in detail_lines[:60]))
+            for line in detail_lines[:60]:
+                console.print(f"[glaucous.sub]    {escape(line)}[/]")
             if len(detail_lines) > 60:
-                print(f"    …（详情共 {len(detail_lines)} 行，已截断展示）")
+                console.print(f"[glaucous.muted]    …（详情共 {len(detail_lines)} 行，已截断展示）[/]")
         dangerous = action.risk == Risk.DANGEROUS
         while True:
             try:
                 if dangerous:
-                    raw = sanitize_input(input("  [a] 同意  [c] 拒绝(附理由): ")).strip()
+                    raw = sanitize_input(console.input("  [glaucous.sub]\\[a] 同意  \\[c] 拒绝(附理由): [/]")).strip()
                 else:
-                    raw = sanitize_input(input("  [a] 同意  [b] 同意同类型  [c] 拒绝(附理由): ")).strip()
+                    raw = sanitize_input(console.input("  [glaucous.sub]\\[a] 同意  \\[b] 同意同类型  \\[c] 拒绝(附理由): [/]")).strip()
             except (EOFError, KeyboardInterrupt):
-                print()
+                console.print()
                 return ApprovalDecision(choice="reject", reason="用户中断审批")
             if raw in ("a", "A", "y", "Y"):
                 return ApprovalDecision(choice="approve")
             if not dangerous and raw in ("b", "B"):
                 return ApprovalDecision(choice="approve_type")
             if raw in ("c", "C", "n", "N"):
-                reason = sanitize_input(input("  拒绝理由（可留空）: ")).strip() or None
+                reason = sanitize_input(console.input("  [glaucous.sub]拒绝理由（可留空）: [/]")).strip() or None
                 return ApprovalDecision(choice="reject", reason=reason)
-            print("  无效输入，请重试。")
+            console.print("[glaucous.error]  无效输入，请重试。[/]")
 
     return decide
 
 
 def prompt_plan_decision(plan: str) -> PlanDecision:
     """打印方案全文并读取三选一决策；非法输入重问；Ctrl+C 视为③继续讨论。"""
-    print("\n╭─ ◆ 方案已就绪 ──────────────────────────────")
-    for line in plan.splitlines():
-        print(f"│  {line}")
-    print("╰──────────────────────────────────────────────")
-    print("  ① 开始构建，每次请求权限")
-    print("  ② 开始构建，同意所有权限")
-    print("  ③ 继续讨论一下")
+    # 方案卡：框内标题栏 + Markdown 正文（markdown.* 走主题色板；
+    # rich Markdown 不解析 console markup，方括号天然安全，无需 escape）
+    console.print()
+    table = make_card(":clipboard: 方案已就绪")
+    if plan.strip():
+        table.add_row(Markdown(plan))
+    console.print(table)
+
+    # 选项：语义色区分（1=海草绿常规 / 2=晚霞橙需注意 / 3=天青继续讨论）
+    console.print("  [glaucous.ok][bold]1️⃣  开始构建，每次请求权限[/][/]")
+    console.print("  [glaucous.warn][bold]2️⃣  开始构建，同意所有权限[/][/]")
+    console.print("  [glaucous.title][bold]3️⃣  继续讨论一下[/][/]")
+
     while True:
         try:
-            raw = sanitize_input(input("  请选择 [1/2/3]（③可附加反馈，格式：3 反馈内容）: ")).strip()
+            raw = sanitize_input(console.input("  [glaucous.sub]请选择 :computer_mouse:（3️⃣ 可附加反馈，格式：3 反馈内容）: [/]")).strip()
         except (EOFError, KeyboardInterrupt):
-            print()
+            console.print()  # 换行
             return PlanDecision(choice=CHOICE_KEEP_PLANNING, feedback=None)
         if not raw:
             continue
@@ -220,53 +270,37 @@ def prompt_plan_decision(plan: str) -> PlanDecision:
             return PlanDecision(choice=CHOICE_KEEP_PLANNING, feedback=feedback.strip() or None)
         if choice in (CHOICE_BUILD_PER_ACTION, CHOICE_BUILD_AUTO_APPROVE):
             return PlanDecision(choice=choice, feedback=feedback.strip() or None)
-        print("  无效选择，请输入 1、2 或 3。")
-
-
-def _ansi_enabled() -> bool:
-    """ANSI 颜色开关：仅交互式终端启用（M3 rich 主题前的轻量实现）。
-
-    Windows conhost 需 os.system("") 启用 VT 处理（无害空命令）；
-    WSL/macOS 终端原生支持；重定向/管道一律纯文本。
-    """
-    if not sys.stdout.isatty():
-        return False
-    if os.name == "nt":
-        os.system("")
-    return True
-
-
-_ANSI = _ansi_enabled()
+        # 错误提示：陶土红 + :x:
+        console.print("  [glaucous.error][bold]  :x: 无效选择，请输入 1、2 或 3。[/][/]")
 
 
 def render_event(event: str, payload: dict[str, Any], state: SessionState) -> None:
-    """loop 事件 → 纯文本渲染（⏺ 动作行 / ⎿ 结果行，学 Claude Code 的密度）。"""
+    """loop 事件 → 主题化渲染（⏺ 动作行 / ⎿ 结果行，学 Claude Code 的密度）。"""
     if event == "text":
-        print(payload["text"], end="", flush=True)
+        # 流式正文：markup/emoji 关闭保证逐字保真（模型输出里的 [...] 不被吞）
+        console.print(payload["text"], end="", soft_wrap=True, markup=False, emoji=False)
     elif event == "diagnostic":
         # 终止诊断（步数上限/解析熔断）：loop 显式通知，保证多步轮中必达
-        print(f"\n  ⎿ {payload['text']}")
+        console.print(f"[glaucous.warn]\n  ⎿ {escape(payload['text'])}[/]")
     elif event == "mode_changed":
         # 模式切换/回归：提示符由 REPL 每轮按 state 重算，这里给一行可读反馈
         policy_note = (
             "·每次审批" if payload["policy"] == POLICY_PER_ACTION else "·自动放行"
         )
-        print(f"  ◆ {payload['reason']}（{payload['mode']}{policy_note}）")
-    elif event == "budget":
-        # 上下文占用条（任务 2.4，FR-25）：12 格进度条 + 百分比，warn/critical 附提示
-        used, limit = int(payload["used"]), int(payload["limit"])
-        ratio = min(1.0, used / limit) if limit else 0.0
-        filled = round(ratio * 12)
-        bar = "█" * filled + "░" * (12 - filled)
-        note = {"warn": "（建议压缩对话）", "critical": "（上下文即将压缩）"}.get(payload["level"], "")
-        line = f"  ctx {ratio:6.1%} [{bar}] {used // 1000}k/{limit // 1000}k tokens {note}"
-        # 三档配色：low 绿 / warn 黄 / critical 红（与压缩阈值同一档位判定）
-        color = {"warn": "\033[33m", "critical": "\033[31m"}.get(payload["level"], "\033[32m")
-        print(f"{color}{line}\033[0m" if _ANSI else line)
+        console.print(f"[glaucous.title]  ◆ {escape(payload['reason'])}（{payload['mode']}{policy_note}）[/]")
+    elif event == "compressed":
+        # 压缩意象（主题设计 §4）：🌊 潮汐——涨潮了，压缩上下文
+        if payload["stage"] == "L1":
+            text, style = "🌊 涨潮了，归档早期对话", "glaucous.sub"
+        elif payload.get("ok"):
+            text, style = "🌊 涨潮了，压缩上下文", "glaucous.title"
+        else:
+            text, style = "🌊 潮水不退，继续精简对话", "glaucous.warn"
+        console.print(f"[{style}]  {text}[/]")
     elif event == "tool_start":
         call = payload["call"]
         brief = call.arguments if len(call.arguments) <= 80 else call.arguments[:80] + "…"
-        print(f"\n  ⏺ {call.name} {brief}")
+        console.print(f"\n  ⏺ [glaucous.tool]{escape(call.name)}[/] [glaucous.text]{escape(brief)}[/]")
     elif event == "tool_end":
         result = payload["result"]
         lines = result.content.splitlines()
@@ -277,15 +311,168 @@ def render_event(event: str, payload: dict[str, Any], state: SessionState) -> No
                 summary = f"…共 {len(lines)} 行 | " + " | ".join(lines[-RESULT_TAIL_LINES:])
         else:
             summary = f"✘ {result.content}"
-        print(f"    ⎿ {summary}")
+        # 成功海草绿 / 失败陶土红（主题设计 §2.3）
+        level_style = "glaucous.ok" if result.ok else "glaucous.error"
+        console.print(f"[{level_style}]    ⎿ {escape(summary)}[/]")
 
 
-def prompt_symbol(state: SessionState) -> str:
-    """模式化提示符：build 追加审批策略缩写，提醒当前授权语义。"""
+def _render_md_tool_end(payload: dict[str, Any], ws: Workspace) -> bool:
+    """agent 路径：read_file 打开 markdown 时渲染卡片替代默认摘要（尽力而为）。
+
+    判定：tool_end 事件、工具为 read_file、结果 ok、path 以 .md/.markdown 结尾。
+    - 行数 ≤ MD_RENDER_MAX_LINES → 沙箱校验后读**文件原文**渲染卡片
+      （read_file 结果带行号 files.py:96，渲染必须读原文才不破坏 md 结构）；
+    - 超长 → 打印 /view 提示并返回 False（维持默认 3 行摘要）；
+    - 渲染失败（越界/IO/非 UTF-8）→ 返回 False 回退默认摘要，不阻断会话。
+    """
+    call = payload.get("call")
+    result = payload.get("result")
+    if call is None or getattr(call, "name", "") != "read_file":
+        return False
+    if result is None or not result.ok:
+        return False
+    try:
+        args = json.loads(getattr(call, "arguments", "") or "{}")
+    except json.JSONDecodeError:
+        return False
+    path = args.get("path")
+    if not isinstance(path, str) or not path.lower().endswith((".md", ".markdown")):
+        return False
+    lines = (result.content or "").count("\n") + 1
+    if lines > MD_RENDER_MAX_LINES:
+        console.print(f"[glaucous.muted]  （markdown 较长，可用 /view {escape(path)} 查看渲染）[/]")
+        return False
+    try:
+        target = ws.check(path)
+        text = target.read_text(encoding="utf-8")
+    except (WorkspaceEscape, OSError, UnicodeDecodeError):
+        return False
+    try:
+        rel = target.relative_to(ws.root)
+    except ValueError:
+        rel = target
+    render_markdown_doc(f":book: {rel}", text)
+    return True
+
+
+# /view 按后缀分发的渲染器注册表（M3 3.3 扩展：代码/文本/CSV）
+# 新增类型只需在此加一行，不碰 _cmd_view 主逻辑；未知类型回退提示走 read_file
+_VIEW_RENDERERS: dict[str, str] = {
+    ".md": "markdown",
+    ".markdown": "markdown",
+    ".py": "code",
+    ".pyi": "code",
+    ".js": "code",
+    ".ts": "code",
+    ".jsx": "code",
+    ".tsx": "code",
+    ".go": "code",
+    ".java": "code",
+    ".rs": "code",
+    ".c": "code",
+    ".h": "code",
+    ".cpp": "code",
+    ".sh": "code",
+    ".bash": "code",
+    ".toml": "code",
+    ".yaml": "code",
+    ".yml": "code",
+    ".json": "code",
+    ".html": "code",
+    ".css": "code",
+    ".sql": "code",
+    ".txt": "text",
+    ".log": "text",
+    ".csv": "csv",
+    ".tsv": "csv",
+}
+
+
+def _detect_binary(data: bytes) -> bool:
+    """NUL 字节检测二进制（比后缀判断可靠，防伪装后缀）。"""
+    return b"\x00" in data[:8192]
+
+
+def _cmd_view(path_arg: str, ws: Workspace) -> None:
+    """/view <路径>：按类型渲染查看工作区内文件（沙箱校验，只读，Plan/Build 均可用）。
+
+    类型分发：md→Markdown 卡片 / 代码→Syntax 语法高亮 / 文本→卡片原文 /
+    csv→表格分列 / 未知或二进制→提示走 read_file。行数 > MD_RENDER_MAX_LINES
+    时打印提示并维持摘要，不整屏刷出。
+    """
+    if not path_arg:
+        console.print("[glaucous.warn]  /view <路径>：以渲染形式查看工作区内的文件（md/代码/文本/csv）。[/]")
+        return
+    try:
+        target = ws.check(path_arg)
+    except WorkspaceEscape as exc:
+        console.print(f"[glaucous.error]  ✘ {escape(str(exc))}[/]")
+        return
+    if not target.exists() or not target.is_file():
+        console.print(f"[glaucous.error]  ✘ 文件不存在或不是文件: {escape(str(target))}[/]")
+        return
+    try:
+        rel = target.relative_to(ws.root)
+    except ValueError:
+        rel = target
+    title = f":book: {rel}"
+
+    kind = _VIEW_RENDERERS.get(target.suffix.lower())
+    if kind is None:
+        console.print(
+            f"[glaucous.warn]  {escape(target.name)} 暂不支持渲染（{escape(target.suffix or '无后缀')}），"
+            "建议用 read_file 查看原文。[/]"
+        )
+        return
+
+    try:
+        data = target.read_bytes()
+    except OSError as exc:
+        console.print(f"[glaucous.error]  ✘ 读取失败: {escape(str(exc))}[/]")
+        return
+    if _detect_binary(data):
+        console.print(f"[glaucous.warn]  {escape(target.name)} 是二进制文件，建议用 read_file 查看原文。[/]")
+        return
+
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        console.print(f"[glaucous.error]  ✘ 非 UTF-8 文本，无法渲染: {escape(str(exc))}[/]")
+        return
+    if text.count("\n") + 1 > MD_RENDER_MAX_LINES:
+        console.print(f"[glaucous.muted]  （{escape(target.name)} 较长 {text.count(chr(10)) + 1} 行，未整屏渲染）[/]")
+        return
+
+    if kind == "markdown":
+        render_markdown_doc(title, text)
+    elif kind == "code":
+        render_code_doc(title, target, text)
+    elif kind == "text":
+        render_text_doc(title, text)
+    elif kind == "csv":
+        render_csv_doc(title, text)
+
+
+def prompt_mode(state: SessionState) -> str:
+    """提示符中的模式段：build 追加审批策略缩写，提醒当前授权语义。"""
     if state.mode == "build":
         policy = "每次审批" if state.approval_policy == POLICY_PER_ACTION else "auto"
-        return f"🌊 build·{policy} > "
-    return "🌊 plan > "
+        return f"build·{policy}"
+    return "plan"
+
+
+def render_prompt_header(model_name: str, report: BudgetReport) -> None:
+    """输入区头部（rich 静态渲染，M3 3.3）：模型 + ctx 占用圆环与 token 用量行。
+
+    模型名右侧依次为 ctx 占用圆环（theme.ctx_ring 三档变色，阈值与 budget
+    同源）与 token 用量（48k/128k tokens）；模式段（🌊 plan >）已并入输入行
+    前缀，由输入方渲染（tty 为 prompt_toolkit 前缀，管道回退拼纯文本提示符）。
+    """
+    ring, level_style = ctx_ring(report.percent)
+    console.print(
+        f"\n[glaucous.muted]{escape(model_name)}[/]  "
+        f"[{level_style}]{ring}[/] [glaucous.muted]{report.used // 1000}k/{report.limit // 1000}k tokens[/]"
+    )
 
 
 def find_latest_session(workspace: Path) -> Path | None:
@@ -303,7 +490,7 @@ def resume_history(workspace: Path, resume_id: str | None, system_prompt: str) -
     if resume_id == "latest" or resume_id is None:
         session_file = find_latest_session(workspace)
         if session_file is None:
-            print("未找到可恢复的会话，将开始新会话。")
+            console.print("[glaucous.muted]未找到可恢复的会话，将开始新会话。[/]")
             return History.create(system_prompt, workspace), SessionState()
     else:
         session_file = sessions_dir / f"{resume_id}.jsonl"
@@ -311,28 +498,28 @@ def resume_history(workspace: Path, resume_id: str | None, system_prompt: str) -
             # 容错：按文件名模糊匹配（用户可只输入时间戳前缀）
             candidates = [p for p in sessions_dir.glob(f"{resume_id}*.jsonl")] if sessions_dir.is_dir() else []
             if not candidates:
-                print(f"未找到会话 {resume_id}，将开始新会话。")
+                console.print(f"[glaucous.muted]未找到会话 {escape(resume_id)}，将开始新会话。[/]")
                 return History.create(system_prompt, workspace), SessionState()
             session_file = candidates[-1]
 
     try:
         history, meta_workspace, warnings = History.load(session_file, system_prompt)
     except (ValueError, OSError) as exc:
-        print(f"会话恢复失败（{exc}），将开始新会话。")
+        console.print(f"[glaucous.error]会话恢复失败（{escape(str(exc))}），将开始新会话。[/]")
         return History.create(system_prompt, workspace), SessionState()
 
-    print(f"🌅 已恢复上次会话（{session_file.stem}）")
+    console.print(f"[glaucous.title]🌅 已恢复上次会话（{escape(session_file.stem)}）[/]")
     for warning in warnings:
-        print(f"  ⚠ {warning}")
+        console.print(f"[glaucous.warn]  ⚠ {escape(warning)}[/]")
     if meta_workspace and meta_workspace.resolve() != workspace:
-        print(f"  ⚠ 会话记录的工作区（{meta_workspace}）与当前不一致，上下文可能错位。")
+        console.print(f"[glaucous.warn]  ⚠ 会话记录的工作区（{escape(str(meta_workspace))}）与当前不一致，上下文可能错位。[/]")
     # 恢复预览：最近几条消息摘要，帮助用户接续上下文
     recent = history.view()[-RESUME_PREVIEW_MESSAGES:]
     for entry in recent:
         role = entry.get("role", "?")
         content = entry.get("content") or "（工具调用/无文本）"
         brief = content if len(content) <= 60 else content[:60] + "…"
-        print(f"  · [{role}] {brief}")
+        console.print(f"[glaucous.muted]  · {escape(f'[{role}] {brief}')}[/]")
     return history, SessionState()
 
 
@@ -341,11 +528,13 @@ async def repl(workspace: Path, resume_id: str | None) -> None:
     try:
         config = load_config()
     except ConfigError as exc:
-        print(f"配置错误：{exc}", file=sys.stderr)
+        console.print(f"[glaucous.error]配置错误：{escape(str(exc))}[/]")
         raise SystemExit(1) from exc
 
-    print(BANNER)
+    render_banner()
     llm = LLMClient(config.profile)
+    # 提示符并列展示当前模型（概设 §8.4 形态；3.4 /model 切换后改为动态读取）
+    model_name = config.profile.model
     # M2 记忆注入（任务 2.1/2.2）：规则全量 + 记忆 Top-N，现读现注入（FR-20/21）
     memory_store = MemoryStore(
         global_path=Path.home() / ".glaucous" / "memory.json",
@@ -380,6 +569,8 @@ async def repl(workspace: Path, resume_id: str | None) -> None:
     def on_event(event: str, payload: dict[str, Any]) -> None:
         if event == "text":
             stream_state["printed"] = True
+        if event == "tool_end" and _render_md_tool_end(payload, ws):
+            return
         render_event(event, payload, state)
 
     loop = AgentLoop(
@@ -387,17 +578,40 @@ async def repl(workspace: Path, resume_id: str | None) -> None:
         context_limit=config.context_limit, outputs_dir=outputs_dir, plans_dir=plans_dir,
     )
 
-    while True:
+    # 输入层（M3 3.3）：tty 下用 prompt_toolkit（↑↓ 历史 + Ctrl+R 搜索 +
+    # PT_STYLE 语义色），历史持久化到 .glaucous/input_history（工作区只读等
+    # 打不开文件时退回内存历史）；非交互（管道/重定向，TODO 1.8 场景）
+    # 回退 console.input，cp936 净化路径与现有行为保持不变
+    session: PromptSession | None = None
+    if sys.stdin.isatty() and sys.stdout.isatty():
         try:
-            task = sanitize_input(input(f"\n{prompt_symbol(state)}")).strip()
+            (workspace / ".glaucous").mkdir(exist_ok=True)
+            input_history = FileHistory(workspace / ".glaucous" / "input_history")
+        except OSError:
+            input_history = None
+        session = PromptSession(history=input_history, style=PT_STYLE)
+
+    while True:
+        # 输入区头部（rich，两路径共用）：模型 + ctx 占用行；模式段并入输入行前缀
+        report = build_report(history.view(), config.context_limit)
+        render_prompt_header(model_name, report)
+        try:
+            if session is not None:
+                prompt_html = HTML(f"<glaucous.title>🌊 {prompt_mode(state)} > </glaucous.title>")
+                task = sanitize_input(await session.prompt_async(prompt_html)).strip()
+            else:
+                task = sanitize_input(console.input(f"🌊 {prompt_mode(state)} > ")).strip()
         except (EOFError, KeyboardInterrupt):
-            print("\n🌅 再见。")
+            console.print("[glaucous.title]:waving_hand: 再见。[/]")
             return
         if not task:
             continue
         if task in ("/exit", "/quit"):
-            print("🌅 再见。")
+            console.print("[glaucous.title]:waving_hand: 再见。[/]")
             return
+        if task == "/view" or task.startswith("/view "):
+            _cmd_view(task[5:].strip(), ws)
+            continue
         # 自然终答已通过 on_text 流式打印（补一个收尾换行）；
         # 终止诊断已由 diagnostic 事件交付（自带换行），不再重复输出
         stream_state["printed"] = False
@@ -406,14 +620,14 @@ async def repl(workspace: Path, resume_id: str | None) -> None:
         except (KeyboardInterrupt, asyncio.CancelledError):
             # asyncio.run 下 SIGINT 以 CancelledError 形态穿透（Day2 Plan §8）：
             # loop 已完成悬空 call 善后，中断本轮继续会话
-            print("\n（已中断本轮，可继续输入新任务）")
+            console.print("[glaucous.muted]\n（已中断本轮，可继续输入新任务）[/]")
             continue
         except Exception as exc:  # noqa: BLE001 —— REPL 顶层兜底：单轮失败不退出会话
-            print(f"\n✘ 本轮执行失败：{exc}", file=sys.stderr)
+            console.print(f"[glaucous.error]\n✘ 本轮执行失败：{escape(str(exc))}[/]")
             continue
 
         if answer and stream_state["printed"]:
-            print()
+            console.print()
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -444,7 +658,7 @@ def main(argv: list[str] | None = None) -> None:
     # 保证 grep 的 relative_to 输出与 system prompt 中的工作区信息稳定
     workspace = Path(args.workspace).resolve()
     if not workspace.is_dir():
-        print(f"工作区不存在或不是目录：{workspace}", file=sys.stderr)
+        console.print(f"[glaucous.error]工作区不存在或不是目录：{escape(str(workspace))}[/]")
         raise SystemExit(1)
     try:
         asyncio.run(repl(workspace, args.resume))
