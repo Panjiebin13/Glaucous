@@ -125,3 +125,8 @@
 - [ ] S2 SkillRegistry.loaded_names() 在 F2 去加载态后产品侧零调用，可评估移除或标注保留理由（extensions/skills.py，M3 既有 API，不在本批范围内动）
 - [ ] S3 /skills 条目排版「名称 [来源] 描述」与 spec §二字面「[来源] 名称」不一致（要素完备，沿用前批排版，视觉验收时统一）
 - [ ] 范围裁剪偿还项（spec §〇）：FR-31 常驻状态栏；思考过程跨 /stop 落盘持久化（/resume 后思考缓冲空态）；/skill 的 Tab 参数补全
+
+### V1.1-M1 模式基座 spec 评审建议项（r2，见 docs/reviews/202608301150-spec-review-v11-m1-mode-base-r2.md）
+
+- [ ] S10 loop.py L145~146 注释含「三选一①②」与「自然终止回归在上方分支 emit」两处失实表述，随 M1 实现一并修正（统一出口保留但触发场景变化）
+- [ ] 范围裁剪偿还项（spec §〇）：授权策略持久化配置面（如 GLAUCOUS_APPROVAL_POLICY），关联计划表 V1.1-M3 任务 3.1 落地后评估
