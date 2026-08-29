@@ -57,13 +57,11 @@ from .tools.shell import BashTool
 from .tools.skill_tool import LoadSkillTool
 from .ui.prompts import build_system_prompt
 
-# 输入层（M3 3.3）：主输入 prompt_toolkit（↑↓ 历史/Ctrl+R 搜索/语义样式），
+# 输入层（M3 3.3）：主输入 prompt_toolkit（↑↓ 历史/Ctrl+R 搜索/语义样式/斜杠补全），
 # 渲染仍走 rich；非交互（管道/重定向）回退 console.input，保住 TODO 1.8 的
-# cp936 stdin 净化路径。提示符类名与 theme.PT_STYLE 语义名一一对应。
-from prompt_toolkit import PromptSession
-from prompt_toolkit.completion import WordCompleter
-from prompt_toolkit.formatted_text import HTML
-from prompt_toolkit.history import FileHistory
+# cp936 stdin 净化路径。prompt_toolkit 相关导入全部延迟到使用点
+# （make_prompt_session / repl 内），依赖损坏不拒启动（m3-day5 plan §4.3 降级②）；
+# 提示符类名与 theme.PT_STYLE 语义名一一对应。
 # rich 渲染：Console/色板单一出口（theme.py），动态内容一律 escape 防 markup 注入
 from rich.markup import escape
 from .theme import (
@@ -625,20 +623,25 @@ def make_prompt_session(workspace: Path):
     """构造 prompt_toolkit PromptSession（M3-UI PT_STYLE + 斜杠命令补全）。
 
     降级三条件命中返回 None：① GLAUCOUS_INPUT=plain（显式开关）；② stdin
-    非 TTY（测试/管道）；③ prompt_toolkit 导入/构造失败（依赖损坏不拒启动）。
+    非 TTY（测试/管道）；③ prompt_toolkit 导入/构造失败（依赖损坏不拒启动，
+    m3-day5 plan §4.3）——导入在此延迟，顶层不依赖 prompt_toolkit。
     """
     if os.environ.get("GLAUCOUS_INPUT", "").strip().lower() == "plain":
         return None
     if not (sys.stdin.isatty() and sys.stdout.isatty()):
         return None
     try:
-        from prompt_toolkit import PromptSession as _PS
+        from prompt_toolkit import PromptSession
+        from prompt_toolkit.completion import WordCompleter
+        from prompt_toolkit.history import FileHistory
+
         (workspace / ".glaucous").mkdir(exist_ok=True)
         try:
             input_history: FileHistory | None = FileHistory(workspace / ".glaucous" / "input_history")
         except OSError:
             input_history = None
-        return _PS(
+        # PT_STYLE 为 None（prompt_toolkit 可导入但样式构造失败）时传默认样式
+        return PromptSession(
             history=input_history,
             style=PT_STYLE,
             completer=WordCompleter(SLASH_COMMANDS),
@@ -718,6 +721,8 @@ async def repl(workspace: Path, resume_id: str | None) -> None:
         render_prompt_header(ctx.current_model, report)
         try:
             if session is not None:
+                from prompt_toolkit.formatted_text import HTML
+
                 prompt_html = HTML(f"<glaucous.title>🌊 {prompt_mode(ctx.state)} > </glaucous.title>")
                 task = sanitize_input(await session.prompt_async(prompt_html)).strip()
             else:

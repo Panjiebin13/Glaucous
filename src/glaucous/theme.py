@@ -16,7 +16,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from prompt_toolkit.styles import Style
 from rich import box
 from rich.console import Console
 from rich.markdown import Markdown
@@ -84,16 +83,22 @@ console = Console(theme=THEME, highlight=False)
 # —— prompt_toolkit 输入层样式（M3 3.3）——
 # 与 rich 共用同一色板：类名即 THEME 的语义名（class:glaucous.text），换色只改
 # 上面色板常量，rich/pt 两侧同时生效。card.*/markdown.* 为 rich 专属，不在此重复。
-PT_STYLE = Style.from_dict({
-    "glaucous.title": f"bold {TEAL}",
-    "glaucous.sub": f"italic {SALT_TEAL}",
-    "glaucous.muted": SKY_GRAY,
-    "glaucous.text": GULL_WHITE,
-    "glaucous.tool": BRIGHT_TEAL,
-    "glaucous.ok": SEA_GRASS,
-    "glaucous.warn": SUNSET,
-    "glaucous.error": CLAY,
-})
+# prompt_toolkit 缺失/损坏时置 None 不拒启动（m3-day5 plan §4.3 降级②），
+# rich 渲染（THEME/console/卡片）完全不依赖 prompt_toolkit。
+try:
+    from prompt_toolkit.styles import Style
+    PT_STYLE: "Style | None" = Style.from_dict({
+        "glaucous.title": f"bold {TEAL}",
+        "glaucous.sub": f"italic {SALT_TEAL}",
+        "glaucous.muted": SKY_GRAY,
+        "glaucous.text": GULL_WHITE,
+        "glaucous.tool": BRIGHT_TEAL,
+        "glaucous.ok": SEA_GRASS,
+        "glaucous.warn": SUNSET,
+        "glaucous.error": CLAY,
+    })
+except ImportError:
+    PT_STYLE = None
 
 
 def make_card(title: str | None = None, *, key_value: bool = False) -> Table:
@@ -130,7 +135,7 @@ def render_markdown_doc(title: str, text: str) -> None:
     if not text.strip():
         console.print(f"[glaucous.muted]  （空文档）[/]")
         return
-    table = make_card(title)
+    table = make_card(escape(title))
     table.add_row(Markdown(text))
     console.print(table)
 
@@ -153,8 +158,8 @@ def render_text_doc(title: str, text: str) -> None:
     if not text.strip():
         console.print(f"[glaucous.muted]  （空文件）[/]")
         return
-    table = make_card(title)
-    table.add_row(text)
+    table = make_card(escape(title))
+    table.add_row(escape(text))  # 文件原文含 [x] 形态极常见（数组/日志标签），必须防 markup 吞字
     console.print(table)
 
 
@@ -177,9 +182,9 @@ def render_csv_doc(title: str, text: str) -> None:
     if not rows:
         render_text_doc(title, text)
         return
-    table = make_card(title, key_value=False)
+    table = make_card(escape(title), key_value=False)
     for row in rows:
-        table.add_row(*[c if c != "" else " " for c in row])
+        table.add_row(*[(escape(c) if c != "" else " ") for c in row])
     console.print(table)
 
 
