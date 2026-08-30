@@ -1,12 +1,14 @@
-"""Plan 模式方案产出工具：submit_plan + read_plan（Day 2 任务 0.12 / Day 4 任务 2.7）。
+"""方案提交与回读工具：submit_plan + read_plan（Day 2 任务 0.12 / Day 4 任务 2.7）。
 
-设计要点（Day2 Plan §4.4，概设 §5.2/§7.4；Day4 Plan §4.7）：
-- 仅 Plan 模式声明（modes={"plan"}）——Build 下幻觉调用被执行层回喂；
-- 方案模板由 system prompt 引导（目标/澄清/设计/步骤/风险，简单任务轻量产出）；
-- confirm 回调呈现三选一（①每次请求权限 ②同意所有权限 ③继续讨论），
-  回调内部改 SessionState（闭包注入），决策结构化回喂让模型理解决策；
+v1.1-M1 重造（概设 v1.1 §4.2，FR-38/39）：
+- submit_plan 从「Plan 模式出口协议（三选一）」变为「高风险主动确认通道（二选）」，
+  全模式可用：BUILD 下=高风险确认卡；PLAN 下=回 Build 的出口（批准即 FR-39
+  「口头确认」，是 Plan→Build 唯一工具面出口，见 spec 决策 D-2）；
+- 状态切换收敛在 CLI 闭包（confirm 内 PLAN 下批准才 enter_build），
+  本工具不持 SessionState；切换反馈由 loop dispatch 统一出口的 mode_changed
+  事件呈现，不经回喂文本（r1-B2 方案 c）；
 - **方案轻量锚（Day 4，概设 §5.2）**：提交时方案全文落盘 .glaucous/plans/<id>.md，
-  决策回喂尾部附锚行（路径 + 目标一行 + 未完成任务数）；历史/JSONL 中的全文
+  批准/反馈回喂尾部附锚行（路径 + 目标一行 + 未完成任务数）；历史/JSONL 中的全文
   由 history.view() 视图变换替换为锚文本（Day4 Plan D11），模型需要细节时
   经 read_plan 按需回读（缺省读最新方案）。
 """
@@ -20,23 +22,22 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
-from .base import MODE_PLAN, Tool, ToolResult
+from .base import ALL_MODES, Tool, ToolResult
 
-# 三选一决策常量（概设 §5.2 授权策略语义）
-CHOICE_BUILD_PER_ACTION = "1"
-CHOICE_BUILD_AUTO_APPROVE = "2"
-CHOICE_KEEP_PLANNING = "3"
+# 二选一决策常量（v1.1-M1，spec §4.1；三选一 CHOICE_* 退役）
+CHOICE_APPROVE = "approve"      # 批准执行
+CHOICE_FEEDBACK = "feedback"    # 修改意见（可附文字）
 
 
 @dataclass
 class PlanDecision:
-    """三选一决策结果：choice 为 "1"/"2"/"3"；③ 可附用户反馈文字。"""
+    """二选一决策结果：choice 为 "approve"/"feedback"；feedback 可附用户修改意见。"""
 
     choice: str
     feedback: str | None = None
 
 
-# confirm 回调：入参方案全文，出参用户决策（CLI 实现为「打印方案 + 三选一输入」）
+# confirm 回调：入参方案全文，出参用户决策（CLI 实现为「方案卡 + 二选一输入」）
 ConfirmCallback = Callable[[str], PlanDecision]
 
 # plan_id 白名单净化（防路径注入，与 safety/output_limit.sanitize_call_id 同规则）
@@ -65,15 +66,15 @@ def _task_count(plan: str) -> int:
 
 
 class SubmitPlanTool(Tool):
-    """提交结构化方案并请求用户三选一确认，驱动 Plan→Build 切换。"""
+    """提交结构化方案并请求用户二选一确认（v1.1：高风险主动确认通道，FR-38）。"""
 
     name = "submit_plan"
     description = (
-        "在探索完成、方案明确后调用：向用户提交方案全文并请求确认。"
+        "向用户提交方案并请求批准（高风险任务主动使用：大范围重构/删除文件/"
+        "修改配置/涉及 .glaucous 与规则文件时）。"
         "方案应包含：目标（需求复述与边界）、步骤（任务清单）、风险（可能的坑与回退方式），"
-        "复杂任务可补充澄清记录与设计要点。用户将三选一："
-        "①开始构建·每次请求权限 ②开始构建·同意所有权限 ③继续讨论。"
-        "仅 Plan 模式可用。"
+        "复杂任务可补充澄清记录与设计要点。用户将二选一：批准执行 / 提出修改意见。"
+        "批准后按当前授权策略直接执行。"
     )
     parameters = {
         "type": "object",
@@ -82,7 +83,7 @@ class SubmitPlanTool(Tool):
         },
         "required": ["plan"],
     }
-    modes = frozenset({MODE_PLAN})
+    modes = ALL_MODES
 
     def __init__(self, confirm: ConfirmCallback, plans_dir: Path | None = None):
         self._confirm = confirm
@@ -133,16 +134,16 @@ class SubmitPlanTool(Tool):
             # Build 执行期间「方案在哪、目标是什么」始终可达
             return ToolResult(ok=True, content=f"{text}{('　' + anchor) if anchor else ''}")
 
-        if decision.choice == CHOICE_BUILD_PER_ACTION:
-            # 决策回喂文案与 SessionState.enter_build 的调用方（CLI 闭包）约定一致
-            return _reply("用户选择①：开始构建（每次请求权限），已切换 Build 模式。请按方案步骤执行，写操作将逐项请求用户确认。")
-        if decision.choice == CHOICE_BUILD_AUTO_APPROVE:
-            return _reply("用户选择②：开始构建（同意所有权限），已切换 Build 模式。请按方案步骤执行，写操作将自动放行。")
-        # ③ 继续讨论：结构化回喂反馈，模型据此修订方案而非原样重提
+        if decision.choice == CHOICE_APPROVE:
+            # 状态切换由 CLI 闭包完成（PLAN 下批准才 enter_build）；
+            # 切换反馈经 loop 统一出口的 mode_changed 事件呈现（r1-B2 方案 c），
+            # 回喂文本不拼接切换附言（ConfirmCallback 契约不变）
+            return _reply("用户已批准方案，请按方案执行。")
+        # 修改意见：结构化回喂反馈，模型据此修订方案而非原样重提
         feedback = (decision.feedback or "").strip()
         feedback_part = f"用户反馈：{feedback}" if feedback else "用户未附加反馈。"
         return _reply(
-            f"用户选择③：继续讨论，仍处于 Plan 模式。{feedback_part}请根据反馈修订方案后再次提交。"
+            f"用户未批准。{feedback_part}请根据反馈修订后再次提交或调整方案。"
         )
 
 

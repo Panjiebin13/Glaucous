@@ -112,6 +112,25 @@ class TestModelCompletion:
         assert complete(completer, "/model gpt") == []
 
 
+class TestPolicyCompletion:
+    """v1.1-M1 /build 参数补全（spec §3.3/r1-S7）：两候选均合法，前缀过滤。"""
+
+    def test_lists_both_policies(self, workspace: Path) -> None:
+        completer = cli.make_repl_completer(workspace)
+        texts = {c.text for c in complete(completer, "/build ")}
+        assert texts == {"auto-approve", "per-action"}
+
+    def test_prefix_filters(self, workspace: Path) -> None:
+        completer = cli.make_repl_completer(workspace)
+        assert {c.text for c in complete(completer, "/build auto")} == {"auto-approve"}
+        assert {c.text for c in complete(completer, "/build per")} == {"per-action"}
+
+    def test_display_meta(self, workspace: Path) -> None:
+        completer = cli.make_repl_completer(workspace)
+        (item,) = complete(completer, "/build auto")
+        assert item.display_meta_text == "授权策略"
+
+
 class TestFreeText:
     def test_free_text_no_completion(self, workspace: Path) -> None:
         """自由对话段不弹补全（需求 2 边界）。"""

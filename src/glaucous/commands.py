@@ -31,7 +31,7 @@ from .extensions.skills import SOURCE_LABEL, SkillRegistry
 from .llm.client import LLMClient
 from .llm.registry import ModelEntry, RegistryError, ping, resolve_profile
 from .permission.approval import ApprovalPipeline, AuditLog
-from .permission.modes import MODE_BUILD, MODE_PLAN, POLICY_PER_ACTION
+from .permission.modes import MODE_BUILD, MODE_PLAN, POLICY_AUTO_APPROVE, POLICY_PER_ACTION
 from .ui.renderer import Renderer
 
 # 记忆作用域与列表序号前缀（/memory 展示，FR-21）
@@ -44,8 +44,8 @@ _SCOPE_LABEL = {"project": "项目", "global": "全局"}
 # 无循环导入）；/view <文件路径>、/expand 一并入表。
 COMMAND_META: dict[str, str] = {
     "/help": "列出全部命令",
-    "/plan": "回到 Plan 模式（只读探索）",
-    "/build": "进入 Build 模式（每次操作审批）",
+    "/plan": "切换到 Plan 研究模式（只读，产出分析与建议）",
+    "/build": "切换到 Build 执行模式（默认自动放行，可选 per-action）",
     "/compact": "手动压缩上下文（L1 裁剪 + L2 摘要）",
     "/clear": "开始新会话（旧会话保留，可 /resume）",
     "/resume": "恢复会话：不带参取最新，id 支持前缀模糊匹配",
@@ -65,6 +65,7 @@ COMMAND_META: dict[str, str] = {
 _COMMAND_USAGE: dict[str, str] = {
     "/resume": "/resume [id]",
     "/model": "/model [name]",
+    "/build": "/build [auto-approve|per-action]",
     "/exit": "/exit  /quit",
     "/view": "/view <文件路径>",
     "/skill": "/skill <名> [任务描述]",
@@ -170,20 +171,34 @@ async def _cmd_help(ctx: ReplContext) -> bool:
 
 async def _cmd_plan(ctx: ReplContext) -> bool:
     if ctx.state.mode == MODE_PLAN:
-        ctx.renderer.note("已处于 Plan 模式，无需切换。")
+        ctx.renderer.note("已处于 Plan 研究模式，无需切换。")
         return True
-    ctx.state.return_to_plan()
+    ctx.state.enter_plan()
     _audit(ctx, event="mode_switch", to="plan", via="/plan")
-    ctx.renderer.info("已回到 Plan 模式（只读探索，授权策略与豁免已重置）。")
+    ctx.renderer.info("已进入 Plan 研究模式（只读，产出分析与建议；/build 或批准方案回切）。")
     return True
 
 
-async def _cmd_build(ctx: ReplContext) -> bool:
-    # 用户驱动进入 Build 一律 per-action：auto-approve 只能经 submit_plan ②
-    # 授予（防绕过方案确认拿全放行，Day5 Plan §4.3）
-    ctx.state.enter_build(POLICY_PER_ACTION)
-    _audit(ctx, event="mode_switch", to="build", policy=POLICY_PER_ACTION, via="/build")
-    ctx.renderer.info("已进入 Build 模式（每次操作审批）。")
+async def _cmd_build(ctx: ReplContext, arg: str = "") -> bool:
+    """切换到 Build（v1.1-M1，FR-36）：无参仅切模式（策略维持现状），
+    auto-approve / per-action 显式落位策略（spec §3.2）；非法参数不改状态。"""
+    policy = arg.strip().lower()
+    if policy and policy not in (POLICY_AUTO_APPROVE, POLICY_PER_ACTION):
+        ctx.renderer.error("用法：/build [auto-approve|per-action]（无参数仅切换模式，策略维持现状）")
+        return True
+    was_build = ctx.state.mode == MODE_BUILD
+    policy_changed = bool(policy) and policy != ctx.state.approval_policy
+    ctx.state.enter_build(policy or None)
+    note = "自动放行 + 底线守卫" if ctx.state.approval_policy == POLICY_AUTO_APPROVE else "每次操作审批"
+    if was_build and not policy_changed:
+        # 已在 Build 且无实际变化（无参或策略相同）：轻提示，不重复审计（与 /plan 对齐）
+        ctx.renderer.note("已处于 Build 模式，授权策略不变。")
+        return True
+    _audit(ctx, event="mode_switch", to="build", policy=ctx.state.approval_policy, via="/build")
+    if not was_build:
+        ctx.renderer.info(f"已进入 Build 模式（{note}）。")
+    else:
+        ctx.renderer.info(f"授权策略已切换：{note}。")
     return True
 
 
@@ -494,7 +509,7 @@ async def handle_command(line: str, ctx: ReplContext) -> bool | str:
     if cmd == "/plan":
         return await _cmd_plan(ctx)
     if cmd == "/build":
-        return await _cmd_build(ctx)
+        return await _cmd_build(ctx, rest)
     if cmd == "/compact":
         return await _cmd_compact(ctx)
     if cmd == "/clear":

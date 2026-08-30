@@ -6,7 +6,7 @@
                         → push_assistant → 逐个 dispatch(call, mode) → push_tool }
 
 终止条件（Day 2 沿用 Day 1 三类）：
-①自然终止（无 tool_calls，正常完成）——Build 模式下触发模式回归（概设 §5.1）
+①自然终止（无 tool_calls，正常完成）——v1.1 起常驻 Build，不再回归 Plan
 ②步数上限（默认 50，防死循环硬熔断）
 ③解析失败熔断（ParseCircuitBroken 异常终止：loop 捕获后为悬空
   call_id 补推 ok=False 的 ToolMessage 保证 History 序列合法，
@@ -17,8 +17,9 @@ mode 快照语义（Day2 Plan §4.5）：每次 LLM 请求前取 state.mode 快�
 写调用仍按 Plan 快照拦截回喂，下一轮起 Build 声明生效，消除
 「声明层与执行层同轮不一致」的窗口。
 
-mode_changed 统一出口：每轮 LLM 响应处理结束后（含自然终止分支）比对
-state.mode 与快照，不一致即 emit——覆盖 submit_plan 切换与自然终止回归两条路径。
+mode_changed 统一出口（v1.1-M1 r1-B1 裁决：保留）：每轮 dispatch 结束后比对
+state.mode 与快照，不一致即 emit——服务 submit_plan 批准回 Build 的
+模式切换反馈；自然终止回归已随 v1.1 退役而不再发生。
 
 守卫检查点固定在「每次请求 LLM 之前」，保证无论循环从哪条路径
 回来都会重新评估终止条件（概设 §4.1）。
@@ -34,7 +35,7 @@ from ..context.compactor import L1_KEEP_RECENT_ROUNDS, MAX_L2_FAILURES
 from ..context.history import History, ToolMessage
 from ..llm.client import LLMClient
 from ..safety.output_limit import truncate_output
-from ..tools.base import MODE_BUILD, ParseCircuitBroken, ToolRegistry, ToolResult
+from ..tools.base import ParseCircuitBroken, ToolRegistry, ToolResult
 from .state import SessionState
 
 # loop → CLI 的事件契约（Day2 Plan §4.5）：Day 1 纯文本渲染，M3 升级 rich 主题
@@ -99,21 +100,10 @@ class AgentLoop:
             )
 
             if not msg.tool_calls:
-                # ① 自然终止：终答入史（REPL 多轮语义：下一轮能看到本轮结论）
+                # ① 自然终止：终答入史（REPL 多轮语义：下一轮能看到本轮结论）。
+                # v1.1 常驻 Build：不再回归 Plan（原 return_to_plan 分支退役）
                 self._history.push_assistant(msg)
                 self._emit_budget()
-                # Build 自然终止 = 任务完成 → 回归 Plan（概设 §5.1）。
-                # 异常终止路径（②③）不在此分支，不触发回归——异常 ≠ 完成
-                if mode_snapshot == MODE_BUILD:
-                    self._state.return_to_plan()
-                    self._emit(
-                        "mode_changed",
-                        {
-                            "mode": self._state.mode,
-                            "policy": self._state.approval_policy,
-                            "reason": "任务完成，已回归 Plan 模式",
-                        },
-                    )
                 return msg.text or ""
 
             # assistant(tool_calls) 先入史：tool 消息配对的前提（OpenAI 协议硬约束）
@@ -142,8 +132,9 @@ class AgentLoop:
                 self._salvage_dangling_calls(msg, dispatched, f"本轮中断，该调用未执行：{reason}")
                 raise
 
-            # submit_plan 三选一①②在 dispatch 内改 state——比对快照统一 emit
-            # mode_changed（Day2 Plan §4.5 统一出口，自然终止回归在上方分支 emit）
+            # submit_plan 批准在 dispatch 内改 state（v1.1 二选：批准执行）——
+            # 比对快照统一 emit mode_changed（Day2 Plan §4.5 统一出口；
+            # v1.1 仅服务 PLAN 下批准回 Build 的切换反馈，BUILD 下批准比对为假不发射）
             if self._state.mode != mode_snapshot:
                 self._emit(
                     "mode_changed",

@@ -1,8 +1,9 @@
-"""审批三选项单测（任务 1.7 / 债务项「审批三选项」+ 状态迁移生命周期）。
+"""审批三选项单测（任务 1.7 / 债务项「审批三选项」+ 状态迁移生命周期；v1.1-M1 适配）。
 
 覆盖：approve/approve_type/reject 各自状态与回喂；同类型放行后不再询问；
 拒绝附理由回喂；DANGEROUS 不受同类型豁免仍逐条确认；bash 细分豁免粒度；
-approved_types 生命周期（enter_build/return_to_plan 清空）；审计落盘与写失败不阻断。
+approved_types 生命周期（enter_build/enter_plan 清空、enter_build(None) 维持策略）；
+审计落盘与写失败不阻断。
 """
 
 from __future__ import annotations
@@ -13,12 +14,13 @@ from pathlib import Path
 import pytest
 
 from glaucous.permission.approval import ApprovalAction, ApprovalDecision, ApprovalPipeline, AuditLog
-from glaucous.permission.modes import POLICY_PER_ACTION, MODE_BUILD, SessionState
+from glaucous.permission.modes import POLICY_AUTO_APPROVE, POLICY_PER_ACTION, MODE_BUILD, MODE_PLAN, SessionState
 from glaucous.permission.risk import Risk
 
 
 @pytest.fixture()
 def state() -> SessionState:
+    # v1.1-M1：显式构造（不依赖字段默认值；默认值断言归 test_mode_default_build.py）
     state = SessionState()
     state.enter_build(POLICY_PER_ACTION)
     return state
@@ -103,12 +105,23 @@ class TestStateLifecycle:
         state.enter_build(POLICY_PER_ACTION)  # 新一轮构建
         assert not state.approved_types
 
-    def test_return_to_plan_resets(self, state: SessionState, audit_path: Path) -> None:
+    def test_enter_plan_resets(self, state: SessionState, audit_path: Path) -> None:
+        # v1.1-M1：return_to_plan 改名 enter_plan；清豁免、策略维持（策略作用域=构建期）
         state.add_approved_type("file_write")
-        state.return_to_plan()
-        assert state.mode != MODE_BUILD
+        state.enter_plan()
+        assert state.mode == MODE_PLAN
         assert state.approval_policy == POLICY_PER_ACTION
         assert not state.approved_types
+
+    def test_enter_build_none_keeps_policy(self) -> None:
+        # v1.1-M1（spec §2.1）：enter_build(None) 仅切模式不改策略
+        state = SessionState()
+        assert state.approval_policy == POLICY_AUTO_APPROVE  # 默认
+        state.enter_build(None)
+        assert state.approval_policy == POLICY_AUTO_APPROVE
+        state.enter_build(POLICY_PER_ACTION)
+        state.enter_build(None)
+        assert state.approval_policy == POLICY_PER_ACTION
 
 
 class TestAudit:

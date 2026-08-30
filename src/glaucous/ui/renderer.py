@@ -169,17 +169,8 @@ class Renderer:
         self.console.print(f"  ✘ {text}", style="glaucous.error", markup=False)
 
     # -- 四类卡片（仅人介入时刻升格，概设 §8.3「无框优先」） -----------------
-
-    def plan_card(self, plan: str) -> None:
-        """方案确认卡（落日橙边——需要人介入的时刻）。选项行由调用方在卡外提示。"""
-        self.console.print(Panel(
-            Text(plan, no_wrap=False),
-            title="◆ 方案已就绪", title_align="left",
-            border_style=PALETTE["warn"], padding=(0, 1),
-        ))
-        self.console.print("  ① 开始构建，每次请求权限", style="glaucous.brand")
-        self.console.print("  ② 开始构建，同意所有权限", style="glaucous.brand")
-        self.console.print("  ③ 继续讨论一下", style="glaucous.brand")
+    # v1.1-M1：plan_card 死方法删除（三选一退役后无调用点；方案卡由
+    # cli.prompt_plan_decision 直接经 make_card 呈现，spec §7.3 清理清单 r1-S4）
 
     def approval_card(self, kind: str, target: str, risk: Risk, detail: str, risk_note: str,
                       dangerous: bool) -> None:

@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .agent.loop import AgentLoop
-from .agent.state import POLICY_AUTO_APPROVE, POLICY_PER_ACTION, SessionState
+from .agent.state import MODE_PLAN, POLICY_AUTO_APPROVE, POLICY_PER_ACTION, SessionState
 from .commands import COMMAND_META, ReplContext, handle_command, begin_turn
 from .config import ConfigError, load_config
 from .context.budget import BudgetReport, build_report
@@ -44,9 +44,8 @@ from .tools.interactive import AskUserTool
 from .tools.memory_tool import MemorySaveTool
 from .tools.output import ReadOutputTool
 from .tools.planning import (
-    CHOICE_BUILD_AUTO_APPROVE,
-    CHOICE_BUILD_PER_ACTION,
-    CHOICE_KEEP_PLANNING,
+    CHOICE_APPROVE,
+    CHOICE_FEEDBACK,
     PlanDecision,
     ReadPlanTool,
     SubmitPlanTool,
@@ -88,7 +87,7 @@ def render_banner(model_name: str, mode: str) -> None:
     """
     table = make_card(":cloud: Glaucous · coding agent（M3 体验与扩展）")
     table.add_row("[glaucous.sub]雨过天青，海鸥滑翔，代码自有清凉[/]")
-    table.add_row("[glaucous.muted]输入任务开始对话，/help 查看命令，/exit 退出。Plan 只读探索，Build 写操作走审批。[/]")
+    table.add_row("[glaucous.muted]输入任务开始对话，/help 查看命令，/exit 退出。默认 Build 自动放行（DANGEROUS 仍单独确认），/plan 切只读研究。[/]")
     table.add_row(f"[glaucous.muted]当前模型 {escape(model_name)} · 模式 {escape(mode)}[/]")
     console.print(table)
 
@@ -112,7 +111,7 @@ SLASH_COMMANDS = [
 
 # 参数段补全注册表（v1.1 反馈 F1，取代 PATH_ARG_COMMANDS 超集）：
 # /view → 工作区路径补全；/model → 模型名前缀过滤（候选经 model_names 动态取）
-ARG_COMPLETIONS = {"/view": "path", "/model": "model"}
+ARG_COMPLETIONS = {"/view": "path", "/model": "model", "/build": "policy"}
 
 # 思考区动态区高度上限（行），滚动显示最近事件（v1.1 R3）
 THINKING_MAX_LINES = 8
@@ -375,7 +374,8 @@ def make_decision_callback(ctx: ReplContext):
 
 
 def prompt_plan_decision(plan: str) -> PlanDecision:
-    """打印方案全文并读取三选一决策；非法输入重问；Ctrl+C 视为③继续讨论。"""
+    """打印方案全文并读取二选一决策（v1.1-M1，FR-38）；非法输入重问；
+    Ctrl+C/EOF 视为②修改意见（模型据此停下/修订，不视为批准，spec §4.3）。"""
     # 方案卡：框内标题栏 + Markdown 正文（markdown.* 走主题色板；
     # rich Markdown 不解析 console markup，方括号天然安全，无需 escape）
     console.print()
@@ -384,26 +384,25 @@ def prompt_plan_decision(plan: str) -> PlanDecision:
         table.add_row(Markdown(plan))
     console.print(table)
 
-    # 选项：语义色区分（1=海草绿常规 / 2=晚霞橙需注意 / 3=天青继续讨论）
-    console.print("  [glaucous.ok][bold]1️⃣  开始构建，每次请求权限[/][/]")
-    console.print("  [glaucous.warn][bold]2️⃣  开始构建，同意所有权限[/][/]")
-    console.print("  [glaucous.title][bold]3️⃣  继续讨论一下[/][/]")
+    # 选项：语义色区分（1=海草绿批准 / 2=晚霞橙修改意见，可附反馈）
+    console.print("  [glaucous.ok][bold]1️⃣  批准执行[/][/]")
+    console.print("  [glaucous.warn][bold]2️⃣  提出修改意见[/][/]")
 
     while True:
         try:
-            raw = sanitize_input(console.input("  [glaucous.sub]请选择 :computer_mouse:（3️⃣ 可附加反馈，格式：3 反馈内容）: [/]")).strip()
+            raw = sanitize_input(console.input("  [glaucous.sub]请选择 :computer_mouse:（2️⃣ 可附加反馈，格式：2 反馈内容）: [/]")).strip()
         except (EOFError, KeyboardInterrupt):
             console.print()  # 换行
-            return PlanDecision(choice=CHOICE_KEEP_PLANNING, feedback=None)
+            return PlanDecision(choice=CHOICE_FEEDBACK, feedback=None)
         if not raw:
             continue
         choice, _, feedback = raw.partition(" ")
-        if choice == CHOICE_KEEP_PLANNING:
-            return PlanDecision(choice=CHOICE_KEEP_PLANNING, feedback=feedback.strip() or None)
-        if choice in (CHOICE_BUILD_PER_ACTION, CHOICE_BUILD_AUTO_APPROVE):
-            return PlanDecision(choice=choice, feedback=feedback.strip() or None)
+        if choice == "1":
+            return PlanDecision(choice=CHOICE_APPROVE)
+        if choice == "2":
+            return PlanDecision(choice=CHOICE_FEEDBACK, feedback=feedback.strip() or None)
         # 错误提示：陶土红 + :x:
-        console.print("  [glaucous.error][bold]  :x: 无效选择，请输入 1、2 或 3。[/][/]")
+        console.print("  [glaucous.error][bold]  :x: 无效选择，请输入 1 或 2。[/][/]")
 
 
 def select_with_arrows(question: str, options: list[str],
@@ -862,37 +861,36 @@ def build_registry(ctx: ReplContext, ws: Workspace, thinking: ThinkingView | Non
     registry.register(LoadSkillTool(ctx.skills))
 
     def confirm(plan: str) -> PlanDecision:
-        """三选一交互：卡片呈现 + 状态切换接线（经 ctx.state，D8）。
+        """二选一交互（v1.1-M1，FR-38）：批准执行 / 修改意见。
 
-        v1.1 R6：TTY 非降级时箭头选择（取消 = 选三，feedback 落「用户取消」，
-        r2-S4：PlanDecision 无 reason 字段）；第三项文案对齐 FR-08 字面；
-        R3：阻塞交互前后暂停/恢复思考区，并记录 plan_decision 伪事件。
+        状态切换收敛（spec §4.3）：PLAN 下批准才 enter_build()（策略维持现状，
+        FR-39 口头确认出口；切换反馈由 loop 统一出口的 mode_changed 事件承担，
+        r1-B2 方案 c），BUILD 下批准不触碰状态；删除旧版按选项落位策略的
+        两处 enter_build——授权策略仅经 /build 显式改变。
+        v1.1 R6：TTY 非降级时箭头选择（取消 = 修改意见，feedback 落「用户取消」，
+        r2-S4：PlanDecision 无 reason 字段）；R3：阻塞交互前后暂停/恢复思考区，
+        并记录 plan_decision 伪事件。
         """
         ctx.live_hooks["pause"]()
         try:
             decision: PlanDecision | None = None
             if _arrow_mode():
-                idx = select_with_arrows(
-                    "请选择：", ["执行（逐次审批）", "执行（自动批准）", "继续讨论一下"]
-                )
+                idx = select_with_arrows("请选择：", ["批准执行", "提出修改意见"])
                 if idx == 0:
-                    decision = PlanDecision(choice=CHOICE_BUILD_PER_ACTION, feedback=None)
-                elif idx == 1:
-                    decision = PlanDecision(choice=CHOICE_BUILD_AUTO_APPROVE, feedback=None)
-                else:  # 选三或取消（Esc）：继续讨论，取消意图统一落 feedback
+                    decision = PlanDecision(choice=CHOICE_APPROVE)
+                else:  # 选二或取消（Esc）：修改意见，取消意图统一落 feedback
                     decision = PlanDecision(
-                        choice=CHOICE_KEEP_PLANNING,
+                        choice=CHOICE_FEEDBACK,
                         feedback="用户取消" if idx is None else None,
                     )
             else:
                 decision = prompt_plan_decision(plan)
-            if decision.choice == CHOICE_BUILD_PER_ACTION:
-                ctx.state.enter_build(POLICY_PER_ACTION)
-            elif decision.choice == CHOICE_BUILD_AUTO_APPROVE:
-                ctx.state.enter_build(POLICY_AUTO_APPROVE)
+            if decision.choice == CHOICE_APPROVE and ctx.state.mode == MODE_PLAN:
+                ctx.state.enter_build()  # FR-39 口头确认：批准即回 Build（策略不变）
             flush_text_segment(ctx)  # §4.2 触发点 2：伪事件前保序落账正文段
             ctx.session_events.append(("plan_decision", {
-                "summary": f"方案决策 → {decision.choice}"
+                "summary": ("方案确认 → 批准" if decision.choice == CHOICE_APPROVE
+                            else "方案确认 → 修改意见")
                 + (f"（反馈：{decision.feedback}）" if decision.feedback else ""),
             }))
             ctx.live_hooks.get("step", lambda: None)()  # N 口径：交互伪事件计入思考步数（§3.1）
@@ -980,7 +978,7 @@ def resume_history(workspace: Path, resume_id: str | None, system_prompt: str,
                    renderer: ThemeRenderer) -> tuple[History, SessionState]:
     """恢复会话：不带参数取最新；前缀模糊匹配；失败回退新会话。
 
-    state 重置 plan/per-action（策略不跨会话持久化）；恢复后 system prompt
+    state 重置为启动默认（v1.1：Build + auto-approve，策略不跨会话持久化）；恢复后 system prompt
     用传入版本（启动时构建，不重建——避免注入段闪变，Day4 D6）。
     """
     sessions_dir = workspace / ".glaucous" / "sessions"
@@ -1109,6 +1107,11 @@ def make_repl_completer(workspace: Path, model_names: Callable[[], list[str]] | 
                     for name in (model_names() if model_names else []):
                         if not arg or name.startswith(arg):
                             yield Completion(name, start_position=-len(arg), display_meta="模型档案")
+                elif kind == "policy":
+                    # /build 参数补全（v1.1-M1，r1-S7）：两个候选均合法，前缀过滤
+                    for name in ("auto-approve", "per-action"):
+                        if not arg or name.startswith(arg):
+                            yield Completion(name, start_position=-len(arg), display_meta="授权策略")
 
         return _ReplCompleter()
     except Exception:  # noqa: BLE001 —— 补全器故障不拒启动：降级无补全输入
