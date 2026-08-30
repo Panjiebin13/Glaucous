@@ -508,11 +508,14 @@ def _default_read_key() -> str:
     old = termios.tcgetattr(fd)
 
     def read_one() -> str:
-        return sys.stdin.read(1)
+        # 直接 os.read（r6 按键修复）：sys.stdin 缓冲层可能一次吞掉整个转义序列
+        # （如 ↑ 的 \x1b[A 三字节），select 探测 fd 时会误报「无后续字节」，
+        # 方向键被误判为 Esc 而取消（WSL 实测复现）；os.read 与 select 同源不冲突
+        return os.read(fd, 1).decode("utf-8", errors="replace")
 
     def esc_followup() -> str | None:
-        # \x1b 后续有字符且为 [A/[B → 方向键；否则视为单独 Esc（取消）
-        ready, _, _ = _select.select([sys.stdin], [], [], 0.05)
+        # \x1b 后续有字节且为 [A/[B（或应用光标模式 OA/OB）→ 方向键；否则视为单独 Esc
+        ready, _, _ = _select.select([fd], [], [], 0.1)
         return read_one() if ready else None
 
     try:
@@ -520,7 +523,7 @@ def _default_read_key() -> str:
         ch = read_one()
         if ch == "\x1b":
             nxt = esc_followup()
-            if nxt == "[":
+            if nxt in ("[", "O"):
                 code = read_one()
                 if code == "A":
                     return "up"
