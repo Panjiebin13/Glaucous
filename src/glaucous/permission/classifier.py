@@ -185,6 +185,9 @@ class CommandClassifier:
         逐一 _path_risk(writing=True) 取最坏——不因命中首个即返回（B2 复评修复）。
         """
         targets = self._collect_redirect_targets(segment)
+        # v1.1 修订（用户实测误报）：丢弃输出的惯用法（2>/dev/null）无写语义，
+        # 不再判 DANGEROUS（此前每次 2>/dev/null 都弹审批卡）
+        targets = [t for t in targets if t.strip("'\"") != "/dev/null"]
         if not targets:
             return None, ""
         worst: Risk | None = None
