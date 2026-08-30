@@ -92,6 +92,25 @@ class MemoryStore:
         self._save(scope)
         return True
 
+    # -- 管理面（/memory 命令，FR-21「可查看/删除」，Day5 Plan §4.3） -------
+
+    def entries(self, scope: str) -> list[dict[str, Any]]:
+        """返回指定作用域全量条目的副本（展示用，防外部误改缓存）。"""
+        if scope not in self._paths:
+            raise ValueError(f"未知记忆作用域: {scope}")
+        return [dict(entry) for entry in self._cache[scope]]
+
+    def remove(self, scope: str, index: int) -> bool:
+        """按 0-based 序号删除一条记忆并落盘；越界/作用域非法返回 False。"""
+        if scope not in self._paths:
+            return False
+        entries = self._cache[scope]
+        if not 0 <= index < len(entries):
+            return False
+        entries.pop(index)
+        self._save(scope)
+        return True
+
     # -- 注入 ---------------------------------------------------------------
 
     def load_injection(self, top_n: int) -> str:

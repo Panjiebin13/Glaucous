@@ -53,13 +53,37 @@ class LLMClient:
     """OpenAI 兼容客户端（仅 HTTP 通道职责）。
 
     重试语义（概设 §4.4）：可重试错误指数退避 + 随机抖动，最多 4 次重试；
-    4xx 属于请求本身的问题（鉴权/参数），重试无意义，直接抛出。
+    4xx 属于请求本身的问题（鉴权/参数错），重试无意义，直接抛出。
+    on_retry 钩子（Day5 Plan §4.2）：退避入睡前通知（第 N 次, 预计等待秒），
+    默认 None 兼容既有构造；只做展示通知，不参与重试决策（纯传输职责不变）。
+    on_usage 钩子（v1.1 打磨 R5）：流式尾部的 usage chunk 到达时发射归一化用量，
+    默认 None 兼容既有构造；只做透传发射，不参与重试决策。
     """
 
     MAX_RETRIES = 4
     BASE_DELAY = 1.0
 
-    def __init__(self, profile: LLMProfile):
+    def __init__(
+        self,
+        profile: LLMProfile,
+        on_retry: Callable[[int, float], None] | None = None,
+        on_usage: Callable[[dict], None] | None = None,
+    ):
+        self._profile = profile
+        self._on_retry = on_retry
+        self._on_usage = on_usage
+        self._client = AsyncOpenAI(
+            api_key=profile.api_key,
+            base_url=profile.base_url,
+            timeout=REQUEST_TIMEOUT,
+        )
+
+    def switch_profile(self, profile: LLMProfile) -> None:
+        """运行时切换模型档案（任务 3.4，概设 §6.2，FR-27）。
+
+        替换 _profile 并重建 AsyncOpenAI 客户端；历史消息为 OpenAI 通用结构，
+        切换只改后续请求路由，会话历史无缝延续；on_retry/on_usage 钩子保留。
+        """
         self._profile = profile
         self._client = AsyncOpenAI(
             api_key=profile.api_key,
@@ -92,8 +116,10 @@ class LLMClient:
                 if attempt == self.MAX_RETRIES:
                     break
                 # 指数退避 + 抖动：1s/2s/4s/8s 基数上叠加 0~1s 随机量，
-                # 避免并发场景下同步重试形成请求风暴
+                # 避免并发场景下同步重试形成请求风暴；入睡前通知展示层（「↻ 重试中」）
                 delay = self.BASE_DELAY * (2**attempt) + random.uniform(0, 1)
+                if self._on_retry is not None:
+                    self._on_retry(attempt + 1, delay)
                 await asyncio.sleep(delay)
         raise LLMError(f"LLM 请求失败（已重试 {self.MAX_RETRIES} 次）：{last_error}") from last_error
 
@@ -109,16 +135,33 @@ class LLMClient:
             "messages": messages,
             "temperature": self._profile.temperature,
             "stream": True,
+            # v1.1 打磨 R5：要求流尾附带 usage；网关不支持时走下方降级重试去参
+            "stream_options": {"include_usage": True},
         }
         if tools:
             kwargs["tools"] = tools
 
-        stream = await self._client.chat.completions.create(**kwargs)
+        try:
+            stream = await self._client.chat.completions.create(**kwargs)
+        except Exception as exc:
+            # 网关兼容降级（R5-S6）：stream_options 不被支持（不可重试类错误）→
+            # 去掉该参数原样重试一次；再失败照原样抛出，由 chat() 正常错误流处理。
+            # 可重试错误（429/5xx/网络）不在此处消耗，仍走 chat() 的退避重试链。
+            if not _is_retryable(exc):
+                kwargs.pop("stream_options", None)
+                stream = await self._client.chat.completions.create(**kwargs)
+            else:
+                raise
 
         text_parts: list[str] = []
         # 按 index 累积 tool_call 增量：name/arguments 都是分片到达（概设 §4.3）
         tool_acc: dict[int, dict[str, str]] = {}
         async for chunk in stream:
+            # usage 尾包（R5）：通常 choices 为空，必须在 choices 检查之前处理；
+            # chunk.usage 为 None 的既有流不受影响（不回调）
+            usage = getattr(chunk, "usage", None)
+            if usage is not None and self._on_usage is not None:
+                self._on_usage(_normalize_usage(usage))
             if not chunk.choices:
                 continue
             delta = chunk.choices[0].delta
@@ -145,6 +188,28 @@ class LLMClient:
         ]
         text = "".join(text_parts)
         return AssistantMessage(text=text or None, tool_calls=tool_calls)
+
+
+def _normalize_usage(usage: Any) -> dict[str, Any]:
+    """归一化不同供应商的 usage 为统一 payload（v1.1 打磨 R5）。
+
+    - DeepSeek：usage.prompt_cache_hit_tokens / prompt_cache_miss_tokens；
+    - OpenAI 风格：prompt_tokens_details.cached_tokens → cache_hit = cached，
+      cache_miss = prompt - cached（仅当 DeepSeek 字段缺失时）；
+    - 供应商未提供的字段一律 None（上层据此省略缓存段）。
+    """
+    prompt = getattr(usage, "prompt_tokens", None)
+    completion = getattr(usage, "completion_tokens", None)
+    cache_hit = getattr(usage, "prompt_cache_hit_tokens", None)
+    cache_miss = getattr(usage, "prompt_cache_miss_tokens", None)
+    if cache_hit is None:
+        details = getattr(usage, "prompt_tokens_details", None)
+        cached = getattr(details, "cached_tokens", None) if details is not None else None
+        if cached is not None:
+            cache_hit = cached
+            if prompt is not None:
+                cache_miss = prompt - cached
+    return {"prompt": prompt, "completion": completion, "cache_hit": cache_hit, "cache_miss": cache_miss}
 
 
 def _is_retryable(exc: Exception) -> bool:

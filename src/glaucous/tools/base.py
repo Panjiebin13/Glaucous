@@ -54,7 +54,8 @@ class Tool:
     parameters 为 JSON Schema dict（type/required/enum/properties/minimum 子集），
     注册表据此生成 OpenAI tools 声明并在 dispatch 时做参数校验。
     modes 声明工具在哪些会话模式可见（声明层过滤 + 执行层校验，概设 §5.1）：
-    默认两模式均可用；写工具仅 build；submit_plan 仅 plan。
+    默认两模式均可用；写工具仅 build；submit_plan 全模式可用（v1.1-M1：
+    高风险主动确认通道，FR-38）。
     risk 声明工具危险级（概设 §5.5）：默认 SAFE；写工具 WRITE；
     bash 动态定级（分类器）。dispatch 权限管线据此决定审批路径。
     """
@@ -197,11 +198,11 @@ class ToolRegistry:
             self._consecutive_parse_failures = 0
             if tool.modes == frozenset({MODE_BUILD}):
                 hint = (
-                    f"当前为 Plan 模式，工具 {call.name} 不可用（只读探索阶段）。"
-                    "请先产出完整方案并调用 submit_plan 请求用户确认，确认后进入 Build 模式即可使用写工具。"
+                    f"当前为 Plan 研究模式，工具 {call.name} 不可用（只读研究）。"
+                    "如需执行修改，请调用 submit_plan 提交方案请求批准，或请用户 /build 回切。"
                 )
             else:
-                hint = f"当前为 Build 模式，工具 {call.name} 不可用。方案已确认，请直接继续执行任务。"
+                hint = f"当前为 Build 模式，工具 {call.name} 不可用。请直接继续执行任务。"
             return self._failure(call, hint)
 
         # 权限管线（Day3 执行层：沙箱/分类已在工具内产生 ApprovalAction，由工具的风险
@@ -234,12 +235,12 @@ class ToolRegistry:
                     self._consecutive_parse_failures = 0
                     self._approval.record_denial(
                         approval_action,
-                        f"Plan 模式禁止该操作：{approval_action.target}",
+                        f"Plan 研究模式禁止该操作：{approval_action.target}",
                     )
                     return self._failure(
                         call,
-                        f"当前处于 Plan 模式，该操作会修改状态：{approval_action.target}。"
-                        "请先产出方案并调用 submit_plan，经用户确认进入 Build 模式后执行。",
+                        f"当前处于 Plan 研究模式，该操作会修改状态：{approval_action.target}。"
+                        "请调用 submit_plan 提交方案请求批准，或请用户 /build 回切后再执行。",
                     )
                 verdict = self._approval.gate(approval_action)
                 if not verdict.allowed:

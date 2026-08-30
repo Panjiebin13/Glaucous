@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import difflib
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from ..permission.approval import ApprovalAction
 from ..permission.risk import Risk
@@ -154,7 +154,8 @@ class WriteFileTool(Tool):
     """写入文件（新建或覆盖整文件）。
 
     审批已收敛到 dispatch 前的 approval.gate（三选项决策，Day3 B3 修复）——
-    工具只负责生成 diff 供审批展示与执行落地；.glaucous/ 写排除在 execute 兜底。
+    工具只负责生成 diff 供审批展示与执行落地；.glaucous/ 写排除在 execute 兜底
+    （v1.1 收窄：.glaucous/skills/ 开放写，技能资产写入后经 on_skill_write 刷新索引）。
     """
 
     name = "write_file"
@@ -173,9 +174,12 @@ class WriteFileTool(Tool):
     modes = frozenset({MODE_BUILD})
     risk = Risk.WRITE
 
-    def __init__(self, workspace: Workspace, reader: ReadFileTool | None = None):
+    def __init__(self, workspace: Workspace, reader: ReadFileTool | None = None,
+                 on_skill_write: Callable[[], None] | None = None):
         self._workspace = workspace
         self._reader = reader
+        # 技能资产写入后的索引刷新回调（cli 注入 ctx.skills.scan；None 时静默跳过）
+        self._on_skill_write = on_skill_write
 
     def build_approval(self, args: dict[str, Any], mode: str) -> ApprovalAction | None:
         """构造审批动作：区内写 WRITE；区外写 DANGEROUS（守卫优先级，不可批量豁免）。
@@ -222,14 +226,23 @@ class WriteFileTool(Tool):
     async def execute(self, path: str = "", content: str = "", **_: Any) -> ToolResult:
         target = self._resolve(path)
         if self._workspace.is_protected(target):
-            # 运行期目录（.glaucous/ 审计/会话）不可被 agent 写（防篡改，Day3 §4.6 S4）
+            # 运行期数据（审计/会话/方案锚/记忆）不可被 agent 写（防篡改，Day3 §4.6 S4；
+            # v1.1 收窄后 .glaucous/skills/ 开放写，不在此列）
             return ToolResult(ok=False, content=f"禁止写入受保护目录: {target}")
 
         # 父目录自动创建：对齐业界工具行为，减少模型先 mkdir 的往返
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content, encoding=UTF8, newline="\n")
         line_count = content.count("\n") + 1 if content else 0
-        return ToolResult(ok=True, content=f"已写入 {path}（{line_count} 行）")
+        note = self._refresh_skill_index(target)
+        return ToolResult(ok=True, content=f"已写入 {path}（{line_count} 行）{note}")
+
+    def _refresh_skill_index(self, target: Path) -> str:
+        """技能资产写入后刷新索引并提示即时生效（v1.1：创建技能无需重启会话）。"""
+        if self._on_skill_write is None or not self._workspace.is_skill_asset(target):
+            return ""
+        self._on_skill_write()
+        return "；技能索引已刷新，可立即用 load_skill 加载"
 
     def _resolve(self, path: str) -> Path:
         if self._reader is not None:
@@ -264,9 +277,11 @@ class EditFileTool(Tool):
     modes = frozenset({MODE_BUILD})
     risk = Risk.WRITE
 
-    def __init__(self, workspace: Workspace, reader: ReadFileTool | None = None):
+    def __init__(self, workspace: Workspace, reader: ReadFileTool | None = None,
+                 on_skill_write: Callable[[], None] | None = None):
         self._workspace = workspace
         self._reader = reader
+        self._on_skill_write = on_skill_write  # 同 WriteFileTool：技能资产编辑后刷新索引
 
     def build_approval(self, args: dict[str, Any], mode: str) -> ApprovalAction | None:
         """构造审批动作：区内写 WRITE；区外写 DANGEROUS（守卫优先级）。
@@ -346,9 +361,17 @@ class EditFileTool(Tool):
 
         new_text = text.replace(old, new) if replace_all else text.replace(old, new, 1)
         target.write_text(new_text, encoding=UTF8, newline="\n")
+        note = self._refresh_skill_index(target)
         if replace_all and occurrences > 1:
-            return ToolResult(ok=True, content=f"已修改 {path}：替换 {occurrences} 处")
-        return ToolResult(ok=True, content=f"已修改 {path}")
+            return ToolResult(ok=True, content=f"已修改 {path}：替换 {occurrences} 处{note}")
+        return ToolResult(ok=True, content=f"已修改 {path}{note}")
+
+    def _refresh_skill_index(self, target: Path) -> str:
+        """同 WriteFileTool：技能资产编辑后刷新索引（v1.1）。"""
+        if self._on_skill_write is None or not self._workspace.is_skill_asset(target):
+            return ""
+        self._on_skill_write()
+        return "；技能索引已刷新，可立即用 load_skill 加载"
 
     def _resolve(self, path: str) -> Path:
         if self._reader is not None:

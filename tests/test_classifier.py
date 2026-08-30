@@ -153,3 +153,11 @@ class TestOutsideReadNeedsApproval:
 
     def test_tilde_write(self, clf: CommandClassifier) -> None:
         assert clf.classify("mv f.txt ~/.ssh/")[0] == Risk.DANGEROUS
+
+
+def test_redirect_dev_null_safe(clf: CommandClassifier) -> None:
+    """v1.1 修订（用户实测误报）：2>/dev/null 丢弃输出无写语义，不再 DANGEROUS。"""
+    assert clf.classify("echo hi 2>/dev/null")[0] == Risk.SAFE
+    assert clf.classify('ls -la 2>/dev/null')[0] == Risk.SAFE
+    # 保留真写语义：普通重定向仍是写操作
+    assert clf.classify("echo hi > out.txt")[0] == Risk.WRITE

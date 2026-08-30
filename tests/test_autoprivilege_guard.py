@@ -17,6 +17,7 @@ from glaucous.permission.risk import Risk
 
 @pytest.fixture()
 def auto_state() -> SessionState:
+    # 显式构造与新默认一致（v1.1-M1）；默认值断言归 test_mode_default_build.py
     state = SessionState()
     state.enter_build(POLICY_AUTO_APPROVE)
     return state
@@ -73,3 +74,17 @@ class TestAutoApprove:
         pipeline, _ = make_pipeline(auto_state, audit_path, [])
         pipeline.gate(ApprovalAction(kind="file_write", target="a.py", risk=Risk.WRITE))
         assert "auto_approve" in audit_path.read_text(encoding="utf-8")
+
+
+class TestDefaultConstruction:
+    def test_default_state_guard_active(self, tmp_path: Path) -> None:
+        # v1.1-M1（spec §7.1）：裸 SessionState() 即默认 Build+auto-approve，
+        # 守卫直接生效：区内写静默放行、DANGEROUS 仍单独确认
+        state = SessionState()
+        assert state.mode == "build" and state.approval_policy == POLICY_AUTO_APPROVE
+        pipeline, asked = make_pipeline(state, tmp_path / "audit.log", [ApprovalDecision(choice="reject")])
+        assert pipeline.gate(ApprovalAction(kind="file_write", target="a.py", risk=Risk.WRITE)).allowed
+        assert asked == []
+        dangerous = ApprovalAction(kind="bash_command", target="rm -rf /", risk=Risk.DANGEROUS)
+        assert not pipeline.gate(dangerous).allowed  # 被单独询问且回调拒绝
+        assert len(asked) == 1

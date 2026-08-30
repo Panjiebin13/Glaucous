@@ -7,6 +7,8 @@
 from __future__ import annotations
 
 from ..permission.modes import (  # noqa: F401
+    MODE_BUILD,
+    MODE_PLAN,
     POLICY_AUTO_APPROVE,
     POLICY_PER_ACTION,
     SessionState,
