@@ -51,9 +51,9 @@ def make_fake_ctx() -> SimpleNamespace:
 
 
 def make_active_thinking() -> cli.ThinkingView:
-    """注入假 Live 使 thinking.active 为 True（不启动真实 rich.live）。"""
+    """折叠激活态（v1.1 修订：自管重绘协议无 Live 可注入，was_active 即判据）。"""
     view = cli.ThinkingView()
-    view._live = SimpleNamespace(update=lambda _r: None, stop=lambda: None, start=lambda: None)
+    view.start()
     return view
 
 
@@ -350,3 +350,63 @@ class TestBudgetThinkingLine:
     def test_empty_payload_no_raise(self) -> None:
         line = cli._thinking_line("budget", {})
         assert "0%" in line  # 缺省 0.0 兜底不抛错
+
+class TestThinkingRedrawProtocol:
+    """v1.1 修订：自管 ANSI 擦除重绘协议（取代 rich.live.Live）的关键行为。"""
+
+    def _wire(self, monkeypatch):
+        import io
+
+        from rich.console import Console
+
+        buf = io.StringIO()
+        monkeypatch.setattr(cli, "console", Console(file=buf, width=100, height=50))
+        return buf
+
+    def test_add_draws_block_and_counts(self, monkeypatch) -> None:
+        buf = self._wire(monkeypatch)
+        view = cli.ThinkingView()
+        view.start()
+        view.add("tool_start", {"call": SimpleNamespace(name="ls", arguments="")})
+        assert "⚙ 思考中 · 1 步" in buf.getvalue()
+        assert view._drawn and view._last_block == 2  # header + 1 行
+        assert view.count == 1
+
+    def test_pause_erases_and_deactivates(self, monkeypatch) -> None:
+        buf = self._wire(monkeypatch)
+        view = cli.ThinkingView()
+        view.start()
+        view.add("tool_start", {"call": SimpleNamespace(name="ls", arguments="")})
+        view.pause()
+        assert not view.active
+        assert "\x1b[2A\x1b[J" in buf.getvalue()  # 擦除动态区（块高 2），交互卡打在原位
+        view.resume()
+        assert view.active  # 恢复后事件重新收纳
+
+    def test_close_erases_and_leaves_summary(self, monkeypatch) -> None:
+        buf = self._wire(monkeypatch)
+        view = cli.ThinkingView()
+        view.start()
+        view.add("tool_end", {
+            "call": SimpleNamespace(name="ls", arguments=""),
+            "result": SimpleNamespace(ok=True, content="x", metadata={}),
+        })
+        view.close({"prompt": 0, "completion": 0})
+        out = buf.getvalue()
+        assert "💭 思考过程（1 步）— /expand 查看" in out
+        assert not view._drawn  # 动态区已擦除
+
+    def test_inactive_turn_no_summary(self, monkeypatch) -> None:
+        buf = self._wire(monkeypatch)
+        view = cli.ThinkingView()  # 未 start（降级/管道轮）
+        view.close({"prompt": 0, "completion": 0})
+        assert "💭" not in buf.getvalue()
+
+    def test_add_while_paused_prints_directly(self, monkeypatch) -> None:
+        buf = self._wire(monkeypatch)
+        view = cli.ThinkingView()
+        view.start()
+        view.pause()
+        view.add("tool_start", {"call": SimpleNamespace(name="ls", arguments="")})
+        # 暂停期事件降级直打（不进动态区、不留待重绘）
+        assert view.count == 1 and not view._lines

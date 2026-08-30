@@ -140,5 +140,6 @@
 ### 产品化打磨遗留（用户 WSL 验收反馈 2026-08-30）
 
 - [x] 箭头选择重绘残影（实测：两个「请选择：」、选项重复、提示行残留）——根因：重绘偏移漏计提示行，旧块被挤下去逐次叠加。已修复：select_with_arrows 整块重绘（问题+选项+提示行）+ \x1b[J 清屏到底 + CJK 按显示宽度截行防折行（回归测试 TestRedrawProtocol），待用户真实终端复核
-- [ ] /view 路径补全重复前缀：已选 /docs 后在其下继续补全出现 /docs/docs/…——应基于当前输入的已有后缀做相对补全（_workspace_path_candidates 修复方向：若 arg 已含 / 结尾的已存在目录，候选应相对该目录展开）
-- [ ] /skill 技能名参数补全：ARG_COMPLETIONS 增 skill 段（候选来自 SkillRegistry.infos() 的技能名，前缀过滤），/skill 后应能提示可用技能
+- [x] /view 路径补全重复前缀：已选 /docs 后在其下继续补全出现 /docs/docs/…——已修复：候选 start_position 统一改为替换整个已输入参数（-len(arg)），不再追加在已输入目录后（回归测试 test_start_position_replaces_full_arg）
+- [x] /skill 技能名参数补全：ARG_COMPLETIONS 增 skill 段已落地（候选来自 SkillRegistry.infos()，前缀过滤，动态取值随技能创建刷新；TestSkillCompletion 4 用例）；补全菜单多行展示 + 默认选中第一条，↑↓ 换选、Enter 落入、再 Enter 执行
+- [x] 终答呈现修订（用户反馈）：渲染前原文不再单独打印（归入思考过程，/expand 可回看），最终输出仅 🕊 Markdown 卡片；思考区动态窗口随终端高度自适应（生成期间尽量不截断，轮末统一收缩）；新增 /collapse 重新收起

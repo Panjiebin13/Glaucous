@@ -61,10 +61,8 @@ from .ui.prompts import build_system_prompt
 # （make_prompt_session / repl 内），依赖损坏不拒启动（m3-day5 plan §4.3 降级②）；
 # 提示符类名与 theme.PT_STYLE 语义名一一对应。
 # rich 渲染：Console/色板单一出口（theme.py），动态内容一律 escape 防 markup 注入；
-# 思考折叠动态区用 rich.live.Live（v1.1 打磨 R3）
+# 思考折叠动态区：自管 ANSI 擦除重绘（v1.1 修订，取代 rich.live.Live）
 from rich.cells import chop_cells
-from rich.console import Group
-from rich.live import Live
 from rich.markup import escape
 from .theme import (
     Markdown,
@@ -634,77 +632,74 @@ def _thinking_line(event: str, payload: dict[str, Any]) -> str:
     return event
 
 
-class ThinkingView:
-    """思考过程折叠动态区（v1.1 打磨 R3）：rich.live.Live 单行计数 + 最近事件滚动。
+def _clip_line(line: str, max_width: int) -> str:
+    """按显示宽度截为单行（CJK 占 2 格；折行会破坏动态区擦除行数协议）。"""
+    cells = chop_cells(line, max(1, max_width))
+    return cells[0] if cells else ""
 
-    时序契约（§3.1）：任务轮开始时 start；非 text 事件经 add 收纳；轮末 close 原地
-    收缩为摘要行（💭 思考过程（N 步 · ↑Xk ↓Yk tokens）— /expand 查看）。启动失败降级：
-    本轮改实时逐条打印，不再尝试（降级后 add 内部直接打印摘要行）。
-    pause/resume 供阻塞交互（四阻塞点）暂停/恢复动态区；缓冲记录在 on_event 层，
-    与 Live 是否存活无关（管道下 /expand 仍可用）。
+
+class ThinkingView:
+    """思考过程动态区（v1.1 修订：ANSI 擦除重绘协议，取代 rich.live.Live）。
+
+    Live 在「自适应大窗口 + 中途 pause/resume + console 直打交叉」下重绘协议
+    会崩坏：内容碎片化泄漏、事件退化为直打、计数丢失（用户 WSL 实测复现），
+    改用与 select_with_arrows 同款的自管协议：每次事件后光标上移擦除旧块重绘，
+    行为完全可控且已在真实终端验证。
+    - pause/resume（live_hooks 接线）：阻塞交互（审批/提问/方案卡）与 diagnostic
+      直打前擦除动态区让位，返回后重绘——交互卡打在动态区原位，不再交叉；
+    - close：擦除动态区，原地收缩为一行摘要；
+    - 窗口高度随终端自适应（_thinking_window：下限 8，上限 60），生成期间
+      尽量不截断，轮末统一收缩；
+    - 打印/擦除失败自动降级：事件改直打（paused 置位），不阻断会话。
     """
 
     def __init__(self) -> None:
         self.count = 0
-        self._live: Live | None = None
         self._lines: list[str] = []
         self._text_buf = ""  # 正文增量滚动缓冲（F4 §4.2，仅尾部两行进窗口）
-        self._degraded = False
-        self.was_active = False  # 本轮 Live 曾成功启动（终答呈现路径判据，v1.1 修订）
+        self._drawn = False       # 动态区块当前在屏上（擦除行数依据）
+        self._last_block = 0      # 上次绘制的块行数
+        self._paused = False
+        self.was_active = False   # 本轮曾进入动态区渲染（终答呈现路径判据）
 
     @property
     def active(self) -> bool:
-        return self._live is not None
+        """折叠收纳判据（make_on_event）：本轮已激活且未被暂停（降级/让位时事件直打）。"""
+        return self.was_active and not self._paused
 
     def start(self) -> None:
-        if self._degraded:
-            return
-        if self._live is None:
+        self.was_active = True
+
+    def _erase(self) -> None:
+        """擦除屏上动态区块（光标回块首 + 清屏到底）；无块则空操作。"""
+        if self._drawn:
             try:
-                self._live = Live(console=console, refresh_per_second=8, transient=False)
-                self._live.start()
-                self._live.update(self._renderable())
-                self.was_active = True
-            except Exception:  # noqa: BLE001 —— 终端不支持 Live：降级实时打印，本轮不再尝试
-                self._live = None
-                self._degraded = True
+                console.file.write(f"\x1b[{self._last_block}A\x1b[J")
+                console.file.flush()
+            except Exception:  # noqa: BLE001 —— 擦除失败按无块处理，不让位失败阻断会话
+                pass
+        self._drawn = False
+        self._last_block = 0
 
-    def add(self, event: str, payload: dict[str, Any]) -> None:
-        self.count += 1
-        line = _thinking_line(event, payload)
-        if not self.active:  # 未启动或已降级：实时打印摘要行（降级路径）
-            console.print(f"[glaucous.dim]  {escape(line)}[/]")
+    def _redraw(self) -> None:
+        """重绘动态区（暂停/降级时空操作）；打印失败置 paused 降级直打。"""
+        if self._paused:
             return
-        self._lines.append(line)
-        self._live.update(self._renderable())
-
-    def add_text(self, delta: str) -> None:
-        """正文增量进动态区滚动（F4 §4.2：生成期间允许临时泄露，轮末收缩折叠）。
-
-        缓冲尾部两行进滚动窗口，视觉等同流式生成中；不计数（N 口径 = 非 text
-        事件 + 交互伪事件 + 正文段落账条目，不含增量，§4.3）。
-        """
-        if not self.active:
+        self._erase()
+        lines = self._block_lines()
+        width = max(console.width - 4, 20)  # 预留 2 格缩进，防折行破坏行数协议
+        try:
+            console.print(f"[glaucous.sub]  {_clip_line(lines[0], width)}[/]")
+            for line in lines[1:]:
+                console.print(f"[glaucous.dim]  {_clip_line(line, width)}[/]")
+        except Exception:  # noqa: BLE001 —— 终端不支持/写入失败：降级实时打印
+            self._paused = True
             return
-        self._text_buf += delta
-        self._live.update(self._renderable())
+        self._drawn = True
+        self._last_block = len(lines)
 
-    def start_turn(self) -> None:
-        """轮级状态重置（F4 §4.3）：计数清零、滚动行与正文尾清空；Live 实例保留复用。
-        会话缓冲不在此列（session_events 仅 /clear、/resume 由命令层清空）。"""
-        self.count = 0
-        self._lines.clear()
-        self._text_buf = ""
-        self.was_active = False
-
-    def note_step(self) -> None:
-        """交互伪事件计数（不占动态区行）：交互以卡片形式呈现，但 N 口径需含（§3.1：
-        N = 非 text 事件 + 交互伪事件，与缓冲//expand 同一口径）。经 live_hooks["step"] 接线。"""
-        self.count += 1
-
-    def _renderable(self) -> Group:
-        header = f"[glaucous.sub]⚙ 思考中 · {self.count} 步[/]"
-        # 正文尾行占窗口（F4 §4.2：生成中正文滚动可见，最终被收缩折叠）
+    def _block_lines(self) -> list[str]:
+        header = f"⚙ 思考中 · {self.count} 步"
         text_tail = []
         if self._text_buf:
             text_tail = [
@@ -713,30 +708,61 @@ class ThinkingView:
             ]
         window = _thinking_window()
         recent = (self._lines[-(window - len(text_tail)):] + text_tail)[-window:]
-        return Group(*([header] + [f"[glaucous.dim]{escape(line)}[/]" for line in recent]))
+        return [header] + recent
+
+    def add(self, event: str, payload: dict[str, Any]) -> None:
+        self.count += 1
+        line = _thinking_line(event, payload)
+        if not self.active:  # 降级/暂停：实时直打摘要行
+            console.print(f"[glaucous.dim]  {escape(line)}[/]")
+            return
+        self._lines.append(line)
+        self._redraw()
+
+    def add_text(self, delta: str) -> None:
+        """正文增量进动态区滚动（F4 §4.2：生成期间允许临时泄露，轮末收缩折叠）。
+
+        缓冲尾部两行进滚动窗口，视觉等同流式生成中；不计数（N 口径 = 非 text
+        事件 + 交互伪事件 + 正文段落账条目，不含增量，§4.3）。
+        """
+        self._text_buf += delta
+        if self.active:
+            self._redraw()
+
+    def start_turn(self) -> None:
+        """轮级状态重置（F4 §4.3）：计数清零、滚动行与正文尾清空。
+        会话缓冲不在此列（session_events 仅 /clear、/resume 由命令层清空）。"""
+        self.count = 0
+        self._lines.clear()
+        self._text_buf = ""
+        self.was_active = False
+        self._paused = False
+        self._drawn = False
+        self._last_block = 0
+
+    def note_step(self) -> None:
+        """交互伪事件计数（不占动态区行）：交互以卡片形式呈现，但 N 口径需含（§3.1：
+        N = 非 text 事件 + 交互伪事件，与缓冲//expand 同一口径）。经 live_hooks["step"] 接线。"""
+        self.count += 1
 
     def pause(self) -> None:
-        # 阻塞交互前让位：保留已渲染内容，交互输出正常打印；重复调用无副作用（契约）
-        if self.active:
-            self._live.stop()
+        # 阻塞交互/diagnostic 直打前让位：擦除动态区，交互卡打在原位；重复调用无副作用
+        self._paused = True
+        self._erase()
 
     def resume(self) -> None:
-        if self._live is not None and not self._degraded:
-            try:
-                self._live.start()
-                self._live.update(self._renderable())
-            except Exception:  # noqa: BLE001 —— 恢复失败同样降级实时打印，不阻断会话
-                self._live = None
-                self._degraded = True
+        self._paused = False
+        self._redraw()
 
     def close(self, usage: dict[str, Any]) -> None:
-        """轮末收缩：原地更新为摘要行后停止（transient=False 保留收缩结果）。"""
-        if not self.active:
+        """轮末收缩：擦除动态区，原地留一行摘要（💭 …）；未激活轮（降级/管道）不打印。"""
+        if not self.was_active:
             return
-        summary = f"[glaucous.dim]💭 思考过程（{self.count} 步{_usage_token_brief(usage)}）— /expand 查看[/]"
-        self._live.update(summary)
-        self._live.stop()
-        self._live = None
+        self._erase()
+        self._paused = False
+        console.print(
+            f"[glaucous.dim]💭 思考过程（{self.count} 步{_usage_token_brief(usage)}）— /expand 查看[/]"
+        )
 
 
 # /view 按后缀分发的渲染器注册表（M3 3.3 扩展：代码/文本/CSV）
@@ -951,10 +977,15 @@ def make_on_event(ctx: ReplContext, ws: Workspace, thinking: ThinkingView | None
                 render_event(event, payload, ctx.state)  # 降级/管道：逐字直接打印
             return
         if event == "diagnostic":
-            # B4 修复：终止诊断必达——不进动态区收缩（直打可见），照常落账；
+            # B4 修复：终止诊断必达——擦除动态区让位后直打可见（终止诊断契约），照常落账；
             # 计入 N 但不占动态区行（§4.3：N 含 diagnostic）
             ctx.session_events.append((event, payload))
-            render_event(event, payload, ctx.state)
+            if thinking is not None and thinking.was_active:
+                thinking.pause()  # 擦除动态区，诊断行打在原位（不再与重绘交叉）
+                render_event(event, payload, ctx.state)
+                thinking.resume()
+            else:
+                render_event(event, payload, ctx.state)
             if thinking is not None:
                 thinking.note_step()
             return
