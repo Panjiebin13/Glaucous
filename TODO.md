@@ -136,3 +136,9 @@
 - [ ] S1 文案措辞与 spec 模板存在超集式改写（语义等价）：planning.py 反馈回喂尾句、cli.py 方案卡选项「提出修改意见」、commands.py /plan 摘要，后续统一口径
 - [ ] S2 test_mode_default_build.py test_approve_in_build_touches_no_state 断言空洞（confirm 闭包未接 state，断言恒真），改按 PLAN 下批准收敛规则写法使其真实约束
 - [ ] S3 「三选一」字样以退役声明形式残留在 modes.py/planning.py/cli.py 等 5 处注释/docstring（spec §7.3「随改随清」口径合规），后续文档轮次统一清理
+
+### 产品化打磨遗留（用户 WSL 验收反馈 2026-08-30）
+
+- [x] 箭头选择重绘残影（实测：两个「请选择：」、选项重复、提示行残留）——根因：重绘偏移漏计提示行，旧块被挤下去逐次叠加。已修复：select_with_arrows 整块重绘（问题+选项+提示行）+ \x1b[J 清屏到底 + CJK 按显示宽度截行防折行（回归测试 TestRedrawProtocol），待用户真实终端复核
+- [ ] /view 路径补全重复前缀：已选 /docs 后在其下继续补全出现 /docs/docs/…——应基于当前输入的已有后缀做相对补全（_workspace_path_candidates 修复方向：若 arg 已含 / 结尾的已存在目录，候选应相对该目录展开）
+- [ ] /skill 技能名参数补全：ARG_COMPLETIONS 增 skill 段（候选来自 SkillRegistry.infos() 的技能名，前缀过滤），/skill 后应能提示可用技能

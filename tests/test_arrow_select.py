@@ -59,3 +59,37 @@ class TestArrowSelect:
     def test_unknown_keys_ignored(self) -> None:
         """无关按键（如误触字符）忽略，不改变选中项。"""
         assert cli.select_with_arrows("请选择：", OPTIONS, read_key=keys("x", "z", "enter")) == 0
+
+
+class TestRedrawProtocol:
+    """重绘协议回归（用户 WSL 实测残影修复）：整块重绘 + 清屏，不产生残影叠加。"""
+
+    def test_redraw_covers_full_block(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """原实现漏计提示行：重绘起点每次低一行，旧块被挤下去残影叠加
+        （两个「请选择：」、选项重复显示）。修复后重绘必须覆盖整块。"""
+        import io
+
+        from rich.console import Console
+
+        buf = io.StringIO()
+        monkeypatch.setattr(cli, "console", Console(file=buf, width=80))
+        assert cli.select_with_arrows("请选择：", OPTIONS, read_key=keys("down", "enter")) == 1
+        out = buf.getvalue()
+        assert out.count("请选择：") == 2      # 初绘 + 一次重绘，不叠加
+        assert out.count("↑↓ 选择") == 2       # 提示行纳入重绘块（原实现在块外只绘一次）
+        assert "\x1b[5A\x1b[J" in out          # 回块首 5 行（3 选项 → 块高 5）+ 清屏到底
+
+    def test_cjk_option_single_line_no_wrap(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """CJK 显示宽度按 2 格计量：超宽中文选项截断为单行，不折行引起漂移。"""
+        import io
+
+        from rich.console import Console
+
+        buf = io.StringIO()
+        monkeypatch.setattr(cli, "console", Console(file=buf, width=20))
+        long_option = "同" * 30
+        assert cli.select_with_arrows("请选择：", [long_option], read_key=keys("enter")) == 0
+        out = buf.getvalue()
+        assert "…" in out                       # 超宽被截断
+        # 单选项块高 3：截断后每行不超终端宽（无折行则行内容各占一行）
+        assert out.count("请选择：") == 1

@@ -62,6 +62,7 @@ from .ui.prompts import build_system_prompt
 # 提示符类名与 theme.PT_STYLE 语义名一一对应。
 # rich 渲染：Console/色板单一出口（theme.py），动态内容一律 escape 防 markup 注入；
 # 思考折叠动态区用 rich.live.Live（v1.1 打磨 R3）
+from rich.cells import chop_cells
 from rich.console import Group
 from rich.live import Live
 from rich.markup import escape
@@ -414,7 +415,9 @@ def select_with_arrows(question: str, options: list[str],
     Application 无法同步 run，故用终端原始按键读取（与事件循环无关）：
     Windows msvcrt.getwch，POSIX termios/tty 临时 raw（try/finally 还原）。
     键语义：↑（含 k）/↓（含 j）循环移动，Enter 确认，Esc（\x1b 后非 [A/[B 即取消）。
-    渲染：ANSI 光标上移重绘选项块，当前项 ❯ 高亮；全部经 theme.console。
+    渲染（r6 重绘修复）：每次按键整块重绘（问题 + 选项 + 提示行），重绘前光标
+    回块首并 \x1b[J 清除旧块（容忍行数漂移），当前项 ❯ 高亮；选项/问题按显示
+    宽度截为单行（CJK 占 2 格），防终端自动折行再次引入漂移。
     可测性：按键源可注入（read_key），返回语义键 up/down/enter/esc 或单字符。
     """
     if read_key is None:
@@ -422,24 +425,35 @@ def select_with_arrows(question: str, options: list[str],
     index = 0
     n = len(options)
 
+    def _one_line(text: str, max_width: int) -> str:
+        """按显示宽度截为单行（chop_cells 按 CJK 占 2 格计量；len() 会低估宽度）。"""
+        cells = chop_cells(text, max(1, max_width - 1))
+        if not cells:
+            return ""
+        return cells[0] + ("…" if len(cells) > 1 else "")
+
     def draw(first: bool) -> None:
         nonlocal index
+        # 整块重绘（r6 修复）：块 = 问题行 + n 个选项行 + 提示行。原实现漏计
+        # 提示行，重绘起点每次低一行，旧块被挤下去残影逐次叠加（WSL 实测复现）。
+        block_lines = n + 2
         if not first:
-            # 光标上移重绘：提示行 + n 个选项行（选项单行截断，避免折行错位）；
-            # 原始 ANSI 转义不经 markup 解析（markup=False）
-            console.print(f"\x1b[{n + 1}A", end="", markup=False)
-        width = max(console.width - 6, 20)
-        console.print(f"  [glaucous.sub]{escape(question)}[/]")
+            # 光标回块首并 \x1b[J 清除旧块到底部；原始转义直写底层文件并 flush——
+            # 经 rich print 会按可打印宽度计量，纯转义串可能被误换行
+            console.file.write(f"\x1b[{block_lines}A\x1b[J")
+            console.file.flush()
+        width = max(console.width - 4, 20)  # 预留 2 格缩进 + ❯ 前缀，防自动折行
+        console.print(f"  [glaucous.sub]{escape(_one_line(question, width))}[/]")
         for i, option in enumerate(options):
-            text = option if len(option) <= width else option[: width - 1] + "…"
+            text = _one_line(option, width)
             if i == index:
                 console.print(f"  [glaucous.title][bold]❯ {escape(text)}[/bold][/]")
             else:
                 console.print(f"    [glaucous.text]{escape(text)}[/]")
+        console.print("  [glaucous.muted]↑↓ 选择 · Enter 确认 · Esc 取消[/]")
 
     try:
         draw(first=True)
-        console.print("  [glaucous.muted]↑↓ 选择 · Enter 确认 · Esc 取消[/]")
         while True:
             key = read_key()
             if key == "enter":
