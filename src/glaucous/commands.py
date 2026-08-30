@@ -12,11 +12,13 @@
 
 from __future__ import annotations
 
+import json
 import os
+import subprocess
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 from .agent.loop import AgentLoop
 from .agent.state import SessionState
@@ -34,6 +36,10 @@ from .permission.approval import ApprovalPipeline, AuditLog
 from .permission.modes import MODE_BUILD, MODE_PLAN, POLICY_AUTO_APPROVE, POLICY_PER_ACTION
 from .ui.renderer import Renderer
 
+if TYPE_CHECKING:
+    from .cli import ThinkingView
+    from .sessions.index import SessionEntry, SessionIndex
+
 # 记忆作用域与列表序号前缀（/memory 展示，FR-21）
 MEMORY_SCOPES = ("project", "global")
 _SCOPE_PREFIX = {"project": "p", "global": "g"}
@@ -49,6 +55,10 @@ COMMAND_META: dict[str, str] = {
     "/compact": "手动压缩上下文（L1 裁剪 + L2 摘要）",
     "/clear": "开始新会话（旧会话保留，可 /resume）",
     "/resume": "恢复会话：不带参取最新，id 支持前缀模糊匹配",
+    "/sessions": "列出/搜索/切换会话（跨项目）",
+    "/rename": "重命名当前会话",
+    "/fork": "分叉当前会话（另存为语义）",
+    "/stats": "会话与全局统计",
     "/model": "列出模型档案 / 切换档案（切换时连通性校验）",
     "/memory": "查看记忆（/memory add|del 管理）",
     "/rules": "查看全局/项目规则文件",
@@ -65,6 +75,9 @@ COMMAND_META: dict[str, str] = {
 # 展示形态（含参数占位与别名）；未列出的命令直接用命令名展示。/exit /quit 条目保留（附加项 C）。
 _COMMAND_USAGE: dict[str, str] = {
     "/resume": "/resume [id]",
+    "/sessions": "/sessions [kw|id|a]",
+    "/rename": "/rename <name>",
+    "/fork": "/fork [name]",
     "/model": "/model [name]",
     "/build": "/build [auto-approve|per-action]",
     "/exit": "/exit  /quit",
@@ -133,6 +146,19 @@ class ReplContext:
     )
     # usage 计入门控：/compact 压缩期间置 False（压缩发生在轮间，不计入任务轮口径）
     counting_usage: bool = True
+    # —— v1.1-M3：会话管理（FR-44~51，spec §四/§五）——
+    # session_index：用户级侧边索引（repl 装配；None=未装配降级）
+    session_index: "SessionIndex | None" = None
+    # session_usage：会话级 token 累计（轮末由 turn_usage 累加；/clear 重置、
+    # /fork 继承、切换时从索引恢复——决策 3/r2-S10 口径）
+    session_usage: dict = field(default_factory=lambda: {"prompt": 0, "completion": 0})
+    # turn_active：切换保护（FR-50，r1-B1 生命周期）——置位=repl 任务轮 run 前，
+    # 复位=repl 轮末 finally；begin_turn 不触碰（也被 /clear、/resume 调用）
+    turn_active: bool = False
+    # thinking：思考区动态区（v1.1-M3 交付后修复 r3-回归：/clear、/resume、/fork、
+    # /sessions 切换触发 rebuild_loop 时必须沿用，否则重建后的 loop 事件全降级直打、
+    # 思考区计数归零、终答不缓冲不渲染卡片）
+    thinking: "ThinkingView | None" = None
     # —— v1.1-M2：子 agent 归属切换（FR-62，概设 §8.3）——
     # runner.run 期间替换、finally 恢复哨兵；active_state=None 语义 = 动态回退
     # ctx.state（confirm 闭包读，永不捕获实例——/clear、/resume 整体替换后仍正确，D8）
@@ -250,8 +276,15 @@ async def _cmd_clear(ctx: ReplContext) -> bool:
         memory=ctx.memory_store.load_injection(ctx.config.memory_top_n),
         skills=ctx.skills.index_text(),
     )
-    ctx.history = History.create(ctx.system_prompt, ctx.workspace)
+    # v1.1-M3（FR-44，r1-B3）：新建会话统一走用户级入口；token 累计重置（决策 3）
+    from .sessions.paths import create_session_history
+
+    history, degraded = create_session_history(ctx.system_prompt, ctx.workspace)
+    if degraded:
+        ctx.renderer.note("⚠ 用户级会话目录不可用，已降级到工作区旧路径。")
+    ctx.history = history
     ctx.state = SessionState()
+    ctx.session_usage = {"prompt": 0, "completion": 0}
     ctx.last_budget = None
     ctx.renderer.last_budget = None
     ctx.session_events.clear()  # v1.1 F4：新会话无思考缓冲，/expand 回到空态提示
@@ -265,6 +298,8 @@ async def _cmd_resume(ctx: ReplContext, arg: str) -> bool:
     """会话内恢复：复用启动 resume_history 逻辑（不带参取最新、前缀模糊匹配）。"""
     from .cli import rebuild_loop, resume_history
 
+    if _switch_blocked(ctx):
+        return True
     history, state = resume_history(
         ctx.workspace, arg.strip() or "latest", ctx.system_prompt, ctx.renderer
     )
@@ -273,8 +308,10 @@ async def _cmd_resume(ctx: ReplContext, arg: str) -> bool:
     ctx.last_budget = None
     ctx.renderer.last_budget = None
     ctx.session_events.clear()  # v1.1 F4：恢复的是历史会话，不携带思考缓冲
+    _restore_session_usage(ctx, history.session_id)  # r2-S10：token 累计从索引恢复
     begin_turn(ctx)
     rebuild_loop(ctx)
+    _note_uncommitted(ctx)
     return True
 
 
@@ -509,6 +546,317 @@ async def _cmd_stop(ctx: ReplContext) -> str:
 
 
 # ---------------------------------------------------------------------------
+# 会话管理（v1.1-M3，FR-46~50；spec §四）
+# ---------------------------------------------------------------------------
+
+
+def _switch_blocked(ctx: ReplContext) -> bool:
+    """切换保护（FR-50，r1-B1 生命周期）：turn_active 置位期间拒绝切换。"""
+    if ctx.turn_active:
+        ctx.renderer.error("本轮任务执行中，无法切换会话。")
+        return True
+    return False
+
+
+def _git_dirty(workspace: Path) -> bool:
+    """git status --porcelain 非空 → 有未提交修改（FR-50）；失败/非 Git 静默 False。"""
+    try:
+        result = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=str(workspace),
+            capture_output=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return bool(result.stdout.strip())
+
+
+def _note_uncommitted(ctx: ReplContext) -> None:
+    """切换/恢复后的未提交修改提示（FR-50；非 Git 工作区静默跳过）。"""
+    if _git_dirty(ctx.workspace):
+        ctx.renderer.note("⚠ 工作区有未提交修改（可能来自其他会话），可 git status 检查（/rollback 待 M4）。")
+
+
+def _restore_session_usage(ctx: ReplContext, session_id: str) -> None:
+    """切换/恢复后的 token 累计恢复（r2-S10：索引只存合计，历史累计计入 ↑ 侧）。"""
+    entry = ctx.session_index.find_by_id(session_id) if ctx.session_index else None
+    ctx.session_usage = {"prompt": entry.token_used if entry else 0, "completion": 0}
+
+
+def _entry_file(entry: "SessionEntry") -> Path:
+    """索引条目 → 会话文件路径：用户级优先，degraded 会话回退 workspace 旧路径（r1-S5）。"""
+    from .sessions.paths import project_hash, sessions_root
+
+    user_level = sessions_root() / project_hash(Path(entry.workspace)) / f"{entry.id}.jsonl"
+    if user_level.exists():
+        return user_level
+    return Path(entry.workspace) / ".glaucous" / "sessions" / f"{entry.id}.jsonl"
+
+
+def _render_session_list(
+    ctx: ReplContext,
+    entries: list["SessionEntry"],
+    *,
+    title: str,
+    show_workspace: bool,
+) -> None:
+    """会话列表卡（FR-47）：名称/更新时间（相对）/消息数/token（/工作区尾段）。"""
+    from rich.markup import escape
+
+    from .theme import console, make_card
+
+    if not entries:
+        ctx.renderer.note("暂无会话。")
+        return
+
+    def _rel_time(iso: str) -> str:
+        try:
+            delta = datetime.now() - datetime.fromisoformat(iso)
+        except ValueError:
+            return iso
+        seconds = int(delta.total_seconds())
+        if seconds < 60:
+            return f"{seconds} 秒前"
+        if seconds < 3600:
+            return f"{seconds // 60} 分钟前"
+        if seconds < 86400:
+            return f"{seconds // 3600} 小时前"
+        return f"{seconds // 86400} 天前"
+
+    table = make_card(f":open_file_folder: {title}")
+    for e in entries:
+        label = e.name or e.id
+        ws_tail = f" · {e.workspace.replace(chr(92), '/').rstrip('/').rsplit('/', 1)[-1]}" if show_workspace else ""
+        table.add_row(
+            f"[glaucous.title]{escape(label)}[/]",
+            f"[glaucous.sub]{escape(_rel_time(e.updated_at))} · {e.message_count} 条 · {_fmt_tokens_short(e.token_used)} tokens{escape(ws_tail)}[/]",
+            f"[glaucous.muted]{escape(e.id)}[/]",
+        )
+    console.print(table)
+
+
+def _fmt_tokens_short(n: int) -> str:
+    """token 短格式（<1000 原样，≥1000 k 单位，与 cli._fmt_tokens 同口径）。"""
+    return str(n) if n < 1000 else f"{n / 1000:.1f}k"
+
+
+async def _cmd_sessions(ctx: ReplContext, arg: str) -> bool:
+    """会话列表 / 搜索 / 切换（FR-47；spec §4.1 四态消解）。"""
+    if ctx.session_index is None:
+        ctx.renderer.note("会话索引不可用（降级模式）。")
+        return True
+    kw = arg.strip()
+    if not kw:
+        here = str(ctx.workspace.resolve())
+        entries = [e for e in ctx.session_index.all_sessions() if e.workspace == here]
+        _render_session_list(ctx, entries, title="会话列表（当前项目）", show_workspace=False)
+        ctx.renderer.note("[a] 全部项目 · /sessions <kw> 搜索 · /sessions <id> 切换")
+        return True
+    if kw == "a":
+        _render_session_list(ctx, ctx.session_index.all_sessions(), title="会话列表（全部项目）", show_workspace=True)
+        return True
+    # id 消解（r1-S2 三态）：精确/前缀唯一 → 切换；多命中 → 候选列表；零命中 → 名称消解
+    entry = ctx.session_index.find_by_prefix(kw, ctx.workspace)
+    if entry is not None:
+        if _switch_blocked(ctx):
+            return True
+        return await _switch_to_session(ctx, _entry_file(entry))
+    candidates = ctx.session_index.prefix_candidates(kw, ctx.workspace)
+    if candidates:
+        _render_session_list(ctx, candidates, title=f"id 前缀 {kw!r} 多命中", show_workspace=True)
+        ctx.renderer.note(f"{len(candidates)} 个候选，请用更长前缀切换")
+        return True
+    # 名称消解（用户实测反馈 2026-08-30）：精确同名唯一 → 切换；子串搜索仅展示
+    exact_name = [e for e in ctx.session_index.search(kw) if e.name == kw]
+    if len(exact_name) == 1:
+        if _switch_blocked(ctx):
+            return True
+        return await _switch_to_session(ctx, _entry_file(exact_name[0]))
+    if len(exact_name) > 1:
+        _render_session_list(ctx, exact_name, title=f"同名会话 {kw!r} 多命中", show_workspace=True)
+        ctx.renderer.note(f"{len(exact_name)} 个同名会话，请用 id 前缀切换")
+        return True
+    results = ctx.session_index.search(kw)
+    if not results:
+        ctx.renderer.note(f"未找到匹配会话：{kw}")
+        return True
+    _render_session_list(ctx, results, title=f"搜索「{kw}」", show_workspace=True)
+    return True
+
+
+async def _switch_to_session(ctx: ReplContext, session_file: Path) -> bool:
+    """切换会话共用流程（FR-50：只恢复对话不动文件；r2-S10 恢复 token 累计）。
+
+    v1.1-M3 交付后对齐（r1-S8 作者确认）：切换后 state 重置为启动默认
+    （SessionState()），与 /resume 既有语义统一——授权策略/模式不跨会话延续。
+    History.load 失败（索引陈旧指向已删文件等，r1-S5）→ 报错保持当前会话。
+    """
+    from .cli import rebuild_loop
+
+    try:
+        history, meta_workspace, warnings = History.load(session_file, ctx.system_prompt)
+    except (ValueError, OSError) as exc:
+        ctx.renderer.error(f"会话切换失败（{exc}），保持当前会话。")
+        return True
+    for warning in warnings:
+        ctx.renderer.note(f"  ⚠ {warning}")
+    if meta_workspace and meta_workspace.resolve() != ctx.workspace:
+        ctx.renderer.note(f"  ⚠ 会话记录的工作区（{meta_workspace}）与当前不一致，上下文可能错位。")
+    ctx.history = history
+    ctx.state = SessionState()  # r1-S8 确认：与 /resume 语义统一
+    ctx.last_budget = None
+    ctx.renderer.last_budget = None
+    ctx.session_events.clear()
+    _restore_session_usage(ctx, history.session_id)
+    rebuild_loop(ctx)
+    ctx.renderer.info(f"已切换到会话 {history.session_id}")
+    _note_uncommitted(ctx)
+    return True
+
+
+async def _cmd_rename(ctx: ReplContext, arg: str) -> bool:
+    """重命名当前会话（FR-46）：同步索引；空参报用法。"""
+    name = arg.strip()
+    if not name:
+        ctx.renderer.note("用法：/rename <name>")
+        return True
+    if ctx.session_index is None:
+        ctx.renderer.note("会话索引不可用（降级模式）。")
+        return True
+    final_name = ctx.session_index.touch(ctx.history.session_id, ctx.workspace, name=name)
+    ctx.renderer.info(f"当前会话已重命名为「{final_name}」")
+    return True
+
+
+async def _cmd_fork(ctx: ReplContext, arg: str) -> bool:
+    """分叉当前会话（FR-48 收窄语义：另存为，从当前状态分叉；spec §4.3）。"""
+    from .cli import rebuild_loop
+
+    if _switch_blocked(ctx):
+        return True
+    src = ctx.history.session_file
+    if src is None or not src.exists():
+        ctx.renderer.error("当前会话文件不存在，无法分叉。")
+        return True
+    from .sessions.index import SessionEntry
+    from .sessions.paths import project_dir
+
+    try:
+        new_file = History.create_session_file(ctx.workspace, session_dir=project_dir(ctx.workspace))
+    except OSError as exc:
+        # r2-B1：入口创建失败（degraded 环境下 mkdir 抛出）→ 报错保持原会话，不击穿 REPL
+        ctx.renderer.error(f"创建分叉会话失败：{exc}（保持当前会话）")
+        return True
+    try:
+        lines = src.read_text(encoding="utf-8").splitlines()
+    except OSError as exc:
+        # r1-B2：IO 失败报错保持原会话（不击穿 REPL）
+        ctx.renderer.error(f"读取当前会话失败，无法分叉：{exc}")
+        return True
+    if not lines:
+        # r1-B2：空文件路径兜底（create 的 meta 落盘为尽力而为，前提不严格成立）
+        ctx.renderer.error("当前会话文件为空，无法分叉。")
+        return True
+    try:
+        meta = json.loads(lines[0])
+        meta["session_id"] = new_file.stem  # meta 行 session_id 替换为新 id（其余行原样）
+        lines[0] = json.dumps(meta, ensure_ascii=False)
+    except (json.JSONDecodeError, IndexError) as exc:
+        ctx.renderer.error(f"当前会话 meta 损坏，无法分叉：{exc}")
+        return True
+    try:
+        new_file.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
+    except OSError as exc:
+        ctx.renderer.error(f"写入分叉会话失败：{exc}（保持当前会话）")
+        return True
+
+    old_entry = ctx.session_index.find_by_id(ctx.history.session_id) if ctx.session_index else None
+    base_name = (old_entry.name if old_entry else "") or "会话"
+    new_name = arg.strip() or f"{base_name}-fork"
+    usage = ctx.session_usage
+    if ctx.session_index is not None:
+        ctx.session_index.upsert(SessionEntry(
+            id=new_file.stem,
+            name=new_name,
+            workspace=str(ctx.workspace.resolve()),
+            created_at=(old_entry.created_at if old_entry else datetime.now().isoformat(timespec="seconds")),
+            updated_at=datetime.now().isoformat(timespec="seconds"),
+            message_count=len(ctx.history.messages),
+            token_used=usage["prompt"] + usage["completion"],
+        ))
+
+    try:
+        history, meta_workspace, warnings = History.load(new_file, ctx.system_prompt)
+    except (ValueError, OSError) as exc:
+        # r1-B2：加载失败报错保持原会话（半写文件留存供排查）
+        ctx.renderer.error(f"分叉会话加载失败：{exc}（保持当前会话）")
+        return True
+    for warning in warnings:
+        ctx.renderer.note(f"  ⚠ {warning}")
+    ctx.history = history  # session_usage 继承当前值（决策 3）；state 重置（r1-S8 统一口径）
+    ctx.state = SessionState()
+    rebuild_loop(ctx)
+    ctx.renderer.info(f"🕊 已分叉到新会话 {history.session_id}（原会话保留，可 /sessions 切回）")
+    return True
+
+
+async def _cmd_stats(ctx: ReplContext) -> bool:
+    """会话与全局统计卡（FR-49；spec §4.4）。"""
+    from rich.markup import escape
+
+    from .sessions.stats import approval_distribution, global_totals, role_distribution
+    from .theme import console, make_card
+
+    roles = role_distribution(ctx.history.messages)
+    usage = ctx.session_usage
+    entry = ctx.session_index.find_by_id(ctx.history.session_id) if ctx.session_index else None
+
+    def _dist_lines(dist: dict[str, dict[str, int]]) -> list[str]:
+        if not dist:
+            return ["（无审批记录）"]
+        lines = []
+        for decision, agents in sorted(dist.items()):
+            total = sum(agents.values())
+            detail = " · ".join(f"{agent} {n}" for agent, n in sorted(agents.items()))
+            lines.append(f"{decision}：共 {total}（{detail}）")
+        return lines
+
+    card = make_card(":bar_chart: 会话统计")
+    card.add_row("会话", f"[glaucous.title]{escape((entry.name if entry else '') or ctx.history.session_id)}[/]")
+    card.add_row("消息分布", " · ".join(f"{role} {n}" for role, n in sorted(roles.items())) or "（空）")
+    card.add_row(
+        "token 累计",
+        f"↑{_fmt_tokens_short(usage['prompt'])} ↓{_fmt_tokens_short(usage['completion'])} tokens",
+    )
+    if entry:
+        card.add_row("活跃时长", f"{entry.created_at} → {entry.updated_at}")
+    for line in _dist_lines(approval_distribution([ctx.workspace / ".glaucous" / "audit.log"])):
+        card.add_row("决策分布", f"[glaucous.sub]{escape(line)}[/]")
+    console.print(card)
+
+    if ctx.session_index is None:
+        return True
+    index, _corrupted = ctx.session_index.load()
+    totals = global_totals(index)
+    audit_paths = [
+        Path(project["workspace"]) / ".glaucous" / "audit.log"
+        for project in (index.get("projects") or {}).values()
+        if project.get("workspace")
+    ]
+    gcard = make_card(":globe_with_meridians: 全局聚合")
+    gcard.add_row(
+        "汇总",
+        f"{totals['sessions']} 个会话 · {totals['messages']} 条消息 · {_fmt_tokens_short(totals['tokens'])} tokens",
+    )
+    for line in _dist_lines(approval_distribution(audit_paths)):
+        gcard.add_row("决策分布", f"[glaucous.sub]{escape(line)}[/]")
+    console.print(gcard)
+    return True
+
+
+# ---------------------------------------------------------------------------
 # 分派入口
 # ---------------------------------------------------------------------------
 
@@ -533,6 +881,14 @@ async def handle_command(line: str, ctx: ReplContext) -> bool | str:
         return await _cmd_clear(ctx)
     if cmd == "/resume":
         return await _cmd_resume(ctx, rest)
+    if cmd == "/sessions":
+        return await _cmd_sessions(ctx, rest)
+    if cmd == "/rename":
+        return await _cmd_rename(ctx, rest)
+    if cmd == "/fork":
+        return await _cmd_fork(ctx, rest)
+    if cmd == "/stats":
+        return await _cmd_stats(ctx)
     if cmd == "/model":
         return await _cmd_model(ctx, rest)
     if cmd == "/memory":

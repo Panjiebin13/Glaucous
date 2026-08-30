@@ -55,6 +55,8 @@ from .tools.search import GrepTool
 from .tools.shell import BashTool
 from .tools.skill_tool import LoadSkillTool
 from .tools.spawn_agent import SpawnAgentTool
+from .sessions.index import SessionIndex, derive_name
+from .sessions.paths import create_session_history, migrate_legacy_sessions, project_dir
 from .ui.prompts import build_system_prompt
 
 # 输入层（M3 3.3）：主输入 prompt_toolkit（↑↓ 历史/Ctrl+R 搜索/语义样式/斜杠补全），
@@ -103,17 +105,17 @@ MD_RENDER_MAX_LINES = 200
 # resume 时回放的最近消息条数（仅 UI 摘要，History 本身全量加载）
 RESUME_PREVIEW_MESSAGES = 6
 
-# prompt_toolkit 补全的斜杠命令全集（17 个：既有 16 + /skill，v1.1 反馈 F3）
+# prompt_toolkit 补全的斜杠命令全集（21 个：既有 17 + M3 会话管理 4 命令）
 SLASH_COMMANDS = [
     "/help", "/plan", "/build", "/compact", "/clear", "/resume", "/model",
     "/memory", "/rules", "/skills", "/skill", "/init", "/stop", "/exit",
-    "/quit", "/view", "/expand",
+    "/quit", "/view", "/expand", "/sessions", "/rename", "/fork", "/stats",
 ]
 
 # 参数段补全注册表（v1.1 反馈 F1，取代 PATH_ARG_COMMANDS 超集）：
 # /view → 工作区路径补全；/model → 模型名前缀过滤（候选经 model_names 动态取）；
 # /build → 授权策略两合法参数；/skill → 技能名补全（候选经 skill_names 动态取）
-ARG_COMPLETIONS = {"/view": "path", "/model": "model", "/build": "policy", "/skill": "skill"}
+ARG_COMPLETIONS = {"/view": "path", "/model": "model", "/build": "policy", "/skill": "skill", "/sessions": "session"}
 
 # 思考区动态区高度下限（行）；实际窗口随终端高度自适应（v1.1 修订：生成期间
 # 尽量不截断思考内容，轮末统一收缩——下限兜底矮终端，上限 60 防占满屏）
@@ -1143,9 +1145,14 @@ def rebuild_loop(ctx: ReplContext, thinking: ThinkingView | None = None) -> None
     state 可能已被整体替换（/clear 重置、/resume 恢复）：管线随新 state
     重建，回调经 ctx 间接引用自动跟随（闭包不捕获旧对象，D8）；
     重建后旧 loop 对象不再被任何入口持有。thinking 为思考区动态区（折叠关闭时为 None）。
+    v1.1-M3 交付后修复：thinking 未显式传入时从 ctx.thinking 取——/clear、/resume、
+    /fork、/sessions 切换的命令层调用均不传参，若重建为 thinking=None 则重建后
+    loop 事件全降级直打、思考区计数归零、终答不缓冲不渲染卡片（用户实测复现）。
     v1.1-M2：决策回调与 on_event 先建一份，同源传入主 pipeline、spawn runner
     与主 loop（spawn_agent 报告经主 on_event 的 sub_* 通道渲染）。
     """
+    if thinking is None:
+        thinking = getattr(ctx, "thinking", None)
     ws = Workspace(ctx.workspace, read_only_extra=ctx.config.read_only_extra)
     on_event = make_on_event(ctx, ws, thinking)
     decision_callback = make_decision_callback(ctx)
@@ -1167,8 +1174,11 @@ def rebuild_loop(ctx: ReplContext, thinking: ThinkingView | None = None) -> None
 
 
 def find_latest_session(workspace: Path) -> Path | None:
-    """定位工作区最新会话文件（按文件名排序取末位，命名含时间戳）。"""
-    sessions_dir = workspace / ".glaucous" / "sessions"
+    """定位工作区最新会话文件（按文件名排序取末位，命名含时间戳）。
+
+    v1.1-M3（FR-44）：用户级 project-hash 目录。
+    """
+    sessions_dir = project_dir(workspace)
     if not sessions_dir.is_dir():
         return None
     files = sorted(sessions_dir.glob("*.jsonl"))
@@ -1179,15 +1189,20 @@ def resume_history(workspace: Path, resume_id: str | None, system_prompt: str,
                    renderer: ThemeRenderer) -> tuple[History, SessionState]:
     """恢复会话：不带参数取最新；前缀模糊匹配；失败回退新会话。
 
+    v1.1-M3（FR-44）：会话目录为用户级 project-hash 目录；三处兜底新建统一走
+    create_session_history（r1-B3/r2-B4，spec §5.4）。
     state 重置为启动默认（v1.1：Build + auto-approve，策略不跨会话持久化）；恢复后 system prompt
     用传入版本（启动时构建，不重建——避免注入段闪变，Day4 D6）。
     """
-    sessions_dir = workspace / ".glaucous" / "sessions"
+    sessions_dir = project_dir(workspace)
     if resume_id == "latest" or resume_id is None:
         session_file = find_latest_session(workspace)
         if session_file is None:
             renderer.note("未找到可恢复的会话，将开始新会话。")
-            return History.create(system_prompt, workspace), SessionState()
+            history, degraded = create_session_history(system_prompt, workspace)
+            if degraded:
+                renderer.note("⚠ 用户级会话目录不可用，已降级到工作区旧路径。")
+            return history, SessionState()
     else:
         session_file = sessions_dir / f"{resume_id}.jsonl"
         if not session_file.exists():
@@ -1195,14 +1210,20 @@ def resume_history(workspace: Path, resume_id: str | None, system_prompt: str,
             candidates = [p for p in sessions_dir.glob(f"{resume_id}*.jsonl")] if sessions_dir.is_dir() else []
             if not candidates:
                 renderer.note(f"未找到会话 {resume_id}，将开始新会话。")
-                return History.create(system_prompt, workspace), SessionState()
+                history, degraded = create_session_history(system_prompt, workspace)
+                if degraded:
+                    renderer.note("⚠ 用户级会话目录不可用，已降级到工作区旧路径。")
+                return history, SessionState()
             session_file = candidates[-1]
 
     try:
         history, meta_workspace, warnings = History.load(session_file, system_prompt)
     except (ValueError, OSError) as exc:
         renderer.error(f"会话恢复失败（{exc}），将开始新会话。")
-        return History.create(system_prompt, workspace), SessionState()
+        history, degraded = create_session_history(system_prompt, workspace)
+        if degraded:
+            renderer.note("⚠ 用户级会话目录不可用，已降级到工作区旧路径。")
+        return history, SessionState()
 
     renderer.info(f"🌅 已恢复上次会话（{session_file.stem}）")
     for warning in warnings:
@@ -1274,7 +1295,8 @@ def _workspace_path_candidates(workspace: Path, arg: str) -> list:
 
 
 def make_repl_completer(workspace: Path, model_names: Callable[[], list[str]] | None = None,
-                        skill_names: Callable[[], list[str]] | None = None):
+                        skill_names: Callable[[], list[str]] | None = None,
+                        session_names: Callable[[], list[str]] | None = None):
     """REPL 补全器（v1.1 R2；反馈 F1 扩展 /model 参数补全与动态模型名）。
 
     - 命令段：/ 开头且无空格 → 命令名前缀补全（meta 取自 commands.COMMAND_META，
@@ -1321,6 +1343,11 @@ def make_repl_completer(workspace: Path, model_names: Callable[[], list[str]] | 
                     for name in (skill_names() if skill_names else []):
                         if not arg or name.startswith(arg):
                             yield Completion(name, start_position=-len(arg), display_meta="技能")
+                elif kind == "session":
+                    # /sessions 会话名补全（v1.1-M3 简版，r1 口径）：当前项目会话名前缀过滤
+                    for name in (session_names() if session_names else []):
+                        if not arg or name.lower().startswith(arg.lower()):
+                            yield Completion(name, start_position=-len(arg), display_meta="会话")
 
         return _ReplCompleter()
     except Exception:  # noqa: BLE001 —— 补全器故障不拒启动：降级无补全输入
@@ -1328,7 +1355,8 @@ def make_repl_completer(workspace: Path, model_names: Callable[[], list[str]] | 
 
 
 def make_prompt_session(workspace: Path, model_names: Callable[[], list[str]] | None = None,
-                        skill_names: Callable[[], list[str]] | None = None):
+                        skill_names: Callable[[], list[str]] | None = None,
+                        session_names: Callable[[], list[str]] | None = None):
     """构造 prompt_toolkit PromptSession（M3-UI PT_STYLE + R2 补全 + 反馈 F1 交互）。
 
     降级三条件命中返回 None：① GLAUCOUS_INPUT=plain（显式开关）；② stdin
@@ -1382,7 +1410,7 @@ def make_prompt_session(workspace: Path, model_names: Callable[[], list[str]] | 
         session = PromptSession(
             history=input_history,
             style=PT_STYLE,
-            completer=make_repl_completer(workspace, model_names, skill_names),
+            completer=make_repl_completer(workspace, model_names, skill_names, session_names),
             complete_while_typing=True,
             key_bindings=kb,
         )
@@ -1454,10 +1482,34 @@ async def repl(workspace: Path, resume_id: str | None) -> None:
         memory=memory_store.load_injection(config.memory_top_n),
         skills=skills.index_text(),
     )
+    # v1.1-M3：会话索引装配（FR-45；损坏/缺失 → 重建降级）+ 旧会话迁移（FR-51）——
+    # 先于会话创建/恢复（迁移后 --resume latest 才能找到刚迁移的会话）；
+    # 写入失败经 on_error 告警（r1-B1：尽力而为 ≠ 静默）
+    session_index = SessionIndex(on_error=lambda msg: theme.note(f"⚠ {msg}"))
+    migrated = migrate_legacy_sessions(workspace, session_index)
+    for line in migrated:
+        theme.note(line)
+    moved_count = sum(1 for line in migrated if line.startswith("已迁移"))  # r1-S3：仅计成功迁移
+    if moved_count:
+        theme.note(f"已迁移 {moved_count} 个旧会话到用户级存储。")
+    _index, corrupted = session_index.load()
+    if corrupted:
+        session_index.rebuild(workspace)
+        theme.note("会话索引已重建（原索引缺失或损坏）。")
+
     if resume_id is not None:
         history, state = resume_history(workspace, resume_id, system_prompt, theme)
     else:
-        history, state = History.create(system_prompt, workspace), SessionState()
+        # v1.1-M3（FR-44）：新建会话统一走用户级入口（r1-B3 存储收敛，spec §5.4）
+        history, degraded = create_session_history(system_prompt, workspace)
+        if degraded:
+            theme.note("⚠ 用户级会话目录不可用，已降级到工作区旧路径。")
+        state = SessionState()
+
+    # 启动后首次登记/恢复 token 累计（r2-S10：从索引恢复，spec §5.1 步骤 4）
+    entry = session_index.find_by_id(history.session_id)
+    session_usage = {"prompt": entry.token_used if entry else 0, "completion": 0}
+    session_index.touch(history.session_id, workspace)
 
     # 默认档案 → 客户端：重试通知经 theme（「↻ 重试中」，§4.2）；
     # on_usage 累加器（v1.1 R5）：归一化 payload 计入 turn_usage（本轮累计口径）；
@@ -1500,9 +1552,12 @@ async def repl(workspace: Path, resume_id: str | None) -> None:
         pipeline=None,
         outputs_dir=workspace / ".glaucous" / "outputs",
         plans_dir=workspace / ".glaucous" / "plans",
+        session_index=session_index,
+        session_usage=session_usage,
     )
     # Live 钩子注入：四阻塞点（ask/decision/plan_decision/retry）经 live_hooks 暂停/恢复动态区；
     # 折叠关闭/管道时保持字段默认的 no-op；retry 经 theme._live_hooks 同源接线（§3.2）
+    ctx.thinking = thinking  # v1.1-M3 交付后修复：供命令层 rebuild_loop 沿用
     if thinking is not None:
         ctx.live_hooks = {
             "pause": thinking.pause,
@@ -1519,6 +1574,7 @@ async def repl(workspace: Path, resume_id: str | None) -> None:
         workspace,
         model_names=lambda: list(ctx.registry_entries),
         skill_names=lambda: [info.name for info in ctx.skills.infos()],
+        session_names=lambda: ctx.session_index.project_names(workspace) if ctx.session_index else [],
     )
 
     while True:
@@ -1566,6 +1622,8 @@ async def repl(workspace: Path, resume_id: str | None) -> None:
         ctx.stream_state["printed"] = False
         answer = None
         turn_ok = False
+        # v1.1-M3（FR-50，r1-B1）：切换保护置位（复位在本轮 finally）
+        ctx.turn_active = True
         try:
             answer = await ctx.loop.run(task)
             turn_ok = True
@@ -1578,6 +1636,19 @@ async def repl(workspace: Path, resume_id: str | None) -> None:
             console.print(f"[glaucous.error]\n✘ 本轮执行失败：{escape(str(exc))}[/]")
             continue
         finally:
+            # v1.1-M3：切换保护复位（r1-B1）+ 会话 token 累计与索引刷新（FR-45，尽力而为）
+            ctx.turn_active = False
+            usage_acc = ctx.session_usage
+            usage_acc["prompt"] += ctx.turn_usage.get("prompt") or 0
+            usage_acc["completion"] += ctx.turn_usage.get("completion") or 0
+            if ctx.session_index is not None:
+                ctx.session_index.touch(
+                    ctx.history.session_id,
+                    ctx.workspace,
+                    auto_name=derive_name(task),  # 仅在 name 为空时生效（FR-46）
+                    message_count=len(ctx.history.messages),
+                    token_used=usage_acc["prompt"] + usage_acc["completion"],
+                )
             # 轮末时序（F4 §4.4）：折叠摘要行 → 最终回答自缓冲一次性输出 + 🕊 卡片 →
             # 用量行；异常路径：收缩与用量行照常，正文段落账后清空（B3），不呈现。
             if thinking is not None:

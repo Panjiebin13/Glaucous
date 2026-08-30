@@ -220,15 +220,18 @@ class TestBeginTurn:
 
 
 def _clear_context(tmp_path) -> SimpleNamespace:
-    """_cmd_clear / _cmd_resume 所需的最小 ctx。"""
+    """_cmd_clear / _cmd_resume 所需的最小 ctx（v1.1-M3：含会话管理三字段）。"""
     ctx = make_fake_ctx()
     ctx.workspace = tmp_path
     ctx.system_prompt = "sp"
     ctx.config = SimpleNamespace(memory_top_n=5, context_limit=128_000, read_only_extra=[])
     ctx.skills = SimpleNamespace(scan=lambda: None, index_text=lambda: "", warnings=[])
     ctx.memory_store = SimpleNamespace(load_injection=lambda n: "")
-    ctx.history = SimpleNamespace(view=lambda: [])
+    ctx.history = SimpleNamespace(view=lambda: [], session_id="old-session")
     ctx.state = SimpleNamespace(mode="plan", approval_policy="per-action")
+    ctx.session_index = None  # 降级路径：_restore_session_usage 回退零值
+    ctx.session_usage = {"prompt": 3, "completion": 1}
+    ctx.turn_active = False
     return ctx
 
 
@@ -243,7 +246,11 @@ class TestSessionBufferReset:
         monkeypatch.setattr(cli, "rebuild_loop", lambda ctx, thinking=None: None)
         monkeypatch.setattr("glaucous.extensions.rules.load_rules", lambda ws: "")
         monkeypatch.setattr("glaucous.ui.prompts.build_system_prompt", lambda *a, **k: "sp")
-        monkeypatch.setattr(commands, "History", SimpleNamespace(create=lambda sp, ws: SimpleNamespace(view=lambda: [])))
+        # v1.1-M3（r1-B3）：_cmd_clear 新建会话统一走 create_session_history（用户级入口）
+        monkeypatch.setattr(
+            "glaucous.sessions.paths.create_session_history",
+            lambda sp, ws: (SimpleNamespace(view=lambda: [], session_id="new-session"), False),
+        )
         assert await commands.handle_command("/clear", ctx) is True
         assert ctx.session_events == []
         assert ctx.text_segment == []
@@ -253,7 +260,14 @@ class TestSessionBufferReset:
         ctx = _clear_context(tmp_path)
         ctx.session_events.append(("mode_changed", MODE_PAYLOAD))
         monkeypatch.setattr(cli, "rebuild_loop", lambda ctx, thinking=None: None)
-        monkeypatch.setattr(cli, "resume_history", lambda ws, rid, sp, renderer: (SimpleNamespace(view=lambda: []), commands.SessionState()))
+        monkeypatch.setattr(
+            cli,
+            "resume_history",
+            lambda ws, rid, sp, renderer: (
+                SimpleNamespace(view=lambda: [], session_id="resumed"),
+                commands.SessionState(),
+            ),
+        )
         assert await commands.handle_command("/resume", ctx) is True
         assert ctx.session_events == []
 

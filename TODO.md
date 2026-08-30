@@ -156,6 +156,28 @@
 - [x] 2.5 tests/test_subagent.py（14 用例）；全量 206 passed（基线 192 守恒，WSL 环境）；spec 评审 3 轮 + 代码评审 4 轮通过（docs/reviews/202608301500-* 与 202608301600-*）
 - [x] 2.6 e2e 实测反馈修复三件（用户决策 2026-08-30，全量 212 passed；详见 spec §十交付后修订）：R1 报告上限 400→1000 字 + 超限落盘 outputs/ 与 read_output 回取提示；R2 子正文增量落账去重（/expand 不刷屏）；R3 权限矩阵修订——区内读一律放行（含 .glaucous/）、区内写维持现状（checkpoint 后再评估）、区外读可同类型豁免、区外写维持不可批量豁免（FR-13 文字修订待办）
 
+### V1.1-M3 会话管理（8/31）
+
+- [x] 3.1 sessions/paths.py：project-hash/用户级目录/旧会话迁移/create_session_history 统一新建入口（5 处收敛）（FR-44/51）
+- [x] 3.2 sessions/index.py：SessionEntry/SessionIndex（原子写/损坏重建/三态 id 消解/自动命名）（FR-45/46）
+- [x] 3.3 /sessions 列表卡（当前项目/全部/搜索/id 切换）+ 切换保护（turn_active）+ 未提交修改提示（FR-47/50）
+- [x] 3.4 /fork：复制当前会话（meta session_id 替换）+ 索引双条目 + 当前 REPL 切换（FR-48）
+- [x] 3.5 sessions/stats.py + /stats 统计卡（角色分布/token/活跃时长/审批决策分布含 agent 小计与未标注桶）+ /rename（FR-46/49）
+- [x] 3.6 单测 20 个（index/commands 两文件）；全量 236 passed（基线 212 守恒，WSL 环境）；spec 评审 4 轮 + 代码评审 3 轮通过（docs/reviews/202608302000-* 与 202608302100-*）
+- [x] 3.7 验收实测反馈修复三件（详见 spec §十二）：R1 /sessions 消解链增名称级（精确同名唯一 → 切换，子串仍仅展示）；R2 名称全局唯一化（同名 upsert/touch/rebuild 自动追加 id 尾段后缀，/rename 提示最终名，用户无需输入 id）；R3 切换后思考区失效回归修复（ReplContext.thinking + rebuild_loop 回退，/clear、/resume、/fork、/sessions 切换后折叠区/卡片渲染不再丢失）；全量 239 passed
+
+### V1.1-M3 会话管理代码评审建议项（r1，见 docs/reviews/202608302100-code-review-v11-m3-sessions-r1.md；B1/B2 已修复并经 r2/r3 聚焦复审放行；r3-S1 状态行已更新）
+
+- [ ] r3-S1 TODO.md 登记头部状态滞后自愈（本轮已更新，后续轮次保持同步）
+- [ ] S1 /sessions 列表卡与 /stats 双卡在单列 make_card 上自动扩列，标题栏形态改变（commands.py，M2-r1-S5 同类先例，视觉验收统一处理）
+- [ ] S2 「a」全部项目视图未按概设「同项目聚组」排序（当前全局时间倒序平铺，commands.py + index.py）
+- [ ] S6 测试缺口：原子写用例、跨项目切换、/stats 内容断言、git dirty 提示 monkeypatch 用例（spec §9.1/9.2 部分项）
+- [ ] S7 会话中途索引损坏的重建无「索引已重建」提示（提示口径仅启动路径满足，index.py 可与 on_error 通道合并）
+
+### V1.1-M3 会话管理 spec 评审建议项（r4，见 docs/reviews/202608302000-spec-review-v11-m3-sessions-r4.md）
+
+- [ ] r4-S1 spec §一 流程图仍写「History.create(session_dir=...) 或 resume」，与 §5.4 统一入口口径未同步（误导性低，下次文档修订顺带同步一行）
+
 ### 产品化打磨遗留（用户 WSL 验收反馈 2026-08-30）
 - [x] 箭头选择重绘残影（实测：两个「请选择：」、选项重复、提示行残留）——根因：重绘偏移漏计提示行，旧块被挤下去逐次叠加。已修复：select_with_arrows 整块重绘（问题+选项+提示行）+ \x1b[J 清屏到底 + CJK 按显示宽度截行防折行（回归测试 TestRedrawProtocol），待用户真实终端复核
 - [x] /view 路径补全重复前缀：已选 /docs 后在其下继续补全出现 /docs/docs/…——已修复：候选 start_position 统一改为替换整个已输入参数（-len(arg)），不再追加在已输入目录后（回归测试 test_start_position_replaces_full_arg）
