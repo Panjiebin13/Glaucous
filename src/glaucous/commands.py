@@ -59,6 +59,7 @@ COMMAND_META: dict[str, str] = {
     "/exit": "退出会话",
     "/view": "查看工作区文件（按类型渲染 Markdown/代码/CSV）",
     "/expand": "回看本会话思考过程",
+    "/collapse": "收起已展开的思考过程（/expand 的逆操作）",
 }
 
 # 展示形态（含参数占位与别名）；未列出的命令直接用命令名展示。/exit /quit 条目保留（附加项 C）。
@@ -484,6 +485,16 @@ async def _cmd_expand(ctx: ReplContext) -> bool:
     return True
 
 
+async def _cmd_collapse(ctx: ReplContext) -> bool:
+    """收起已展开的思考过程（v1.1 修订，用户反馈）：/expand 的逆操作。
+
+    重印折叠摘要行收尾；已滚出屏的展开内容不回擦（行数受 rich 折行影响
+    不准，回擦有残留风险，取舍为零风险收尾）。
+    """
+    ctx.renderer.note("💭 思考过程已收起 — /expand 可再次查看。")
+    return True
+
+
 async def _cmd_stop(ctx: ReplContext) -> str:
     # 输入阶段无运行中任务（REPL 串行）：会话 JSONL 已全量落盘，
     # /resume 即恢复通道（Day5 Plan D7）
@@ -530,6 +541,8 @@ async def handle_command(line: str, ctx: ReplContext) -> bool | str:
         return await _cmd_init(ctx)
     if cmd == "/expand":
         return await _cmd_expand(ctx)
+    if cmd == "/collapse":
+        return await _cmd_collapse(ctx)
     # 附加项 C：/exit、/quit 分派分支已删除（cli repl 内联拦截为唯一路径）；
     # HELP_LINES 中条目保留（经 COMMAND_META/_COMMAND_USAGE）
     if cmd == "/stop":

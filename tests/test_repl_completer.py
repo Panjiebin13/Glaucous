@@ -54,6 +54,30 @@ class TestCommandCompletion:
         assert item.display_meta_text == COMMAND_META["/expand"]
 
 
+class TestSkillCompletion:
+    """v1.1 修订 /skill 技能名补全：候选经 skill_names() 动态取值（技能创建后跟随）。"""
+
+    def test_lists_all_skills(self, workspace: Path) -> None:
+        names = ["code-review", "create-skill", "release-checklist"]
+        completer = cli.make_repl_completer(workspace, skill_names=lambda: names)
+        assert {c.text for c in complete(completer, "/skill ")} == set(names)
+
+    def test_prefix_filters(self, workspace: Path) -> None:
+        names = ["code-review", "create-skill"]
+        completer = cli.make_repl_completer(workspace, skill_names=lambda: names)
+        assert {c.text for c in complete(completer, "/skill co")} == {"code-review"}
+        assert {c.text for c in complete(completer, "/skill cre")} == {"create-skill"}
+
+    def test_no_source_no_candidates(self, workspace: Path) -> None:
+        completer = cli.make_repl_completer(workspace)
+        assert complete(completer, "/skill ") == []
+
+    def test_display_meta(self, workspace: Path) -> None:
+        completer = cli.make_repl_completer(workspace, skill_names=lambda: ["code-review"])
+        (item,) = complete(completer, "/skill ")
+        assert item.display_meta_text == "技能"
+
+
 class TestPathCompletion:
     def test_candidates_after_space(self, workspace: Path) -> None:
         completer = cli.make_repl_completer(workspace)
@@ -82,6 +106,14 @@ class TestPathCompletion:
         """遍历异常（目录不存在）静默返回空候选，不抛错（§2.2）。"""
         completer = cli.make_repl_completer(tmp_path / "not-exists")
         assert complete(completer, "/view ") == []
+
+    def test_start_position_replaces_full_arg(self, workspace: Path) -> None:
+        """重复前缀回归（用户实测 /docs/docs/…）：已输入目录前缀后继续补全，
+        候选替换长度必须等于已输入参数长度（替换全文），而非追加在尾部。"""
+        completer = cli.make_repl_completer(workspace)
+        (item,) = complete(completer, "/view docs/")
+        assert item.text == "docs/guide.md"
+        assert item.start_position == -len("docs/")  # 替换 docs/，不再叠加
 
 
 class TestModelCompletion:

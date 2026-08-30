@@ -111,11 +111,19 @@ SLASH_COMMANDS = [
 ]
 
 # 参数段补全注册表（v1.1 反馈 F1，取代 PATH_ARG_COMMANDS 超集）：
-# /view → 工作区路径补全；/model → 模型名前缀过滤（候选经 model_names 动态取）
-ARG_COMPLETIONS = {"/view": "path", "/model": "model", "/build": "policy"}
+# /view → 工作区路径补全；/model → 模型名前缀过滤（候选经 model_names 动态取）；
+# /build → 授权策略两合法参数；/skill → 技能名补全（候选经 skill_names 动态取）
+ARG_COMPLETIONS = {"/view": "path", "/model": "model", "/build": "policy", "/skill": "skill"}
 
-# 思考区动态区高度上限（行），滚动显示最近事件（v1.1 R3）
+# 思考区动态区高度下限（行）；实际窗口随终端高度自适应（v1.1 修订：生成期间
+# 尽量不截断思考内容，轮末统一收缩——下限兜底矮终端，上限 60 防占满屏）
 THINKING_MAX_LINES = 8
+
+
+def _thinking_window() -> int:
+    """动态区滚动窗口高度：随终端高度自适应（下限 8，上限 60）。"""
+    height = getattr(console, "height", None) or 24
+    return max(THINKING_MAX_LINES, min(height - 12, 60))
 
 # 动态区正文尾行单行宽度上限（F4 §4.2：长段落折行单行，防止窗口被单行淹没）
 THINKING_LINE_WIDTH = 120
@@ -642,6 +650,7 @@ class ThinkingView:
         self._lines: list[str] = []
         self._text_buf = ""  # 正文增量滚动缓冲（F4 §4.2，仅尾部两行进窗口）
         self._degraded = False
+        self.was_active = False  # 本轮 Live 曾成功启动（终答呈现路径判据，v1.1 修订）
 
     @property
     def active(self) -> bool:
@@ -655,6 +664,7 @@ class ThinkingView:
                 self._live = Live(console=console, refresh_per_second=8, transient=False)
                 self._live.start()
                 self._live.update(self._renderable())
+                self.was_active = True
             except Exception:  # noqa: BLE001 —— 终端不支持 Live：降级实时打印，本轮不再尝试
                 self._live = None
                 self._degraded = True
@@ -685,6 +695,7 @@ class ThinkingView:
         self.count = 0
         self._lines.clear()
         self._text_buf = ""
+        self.was_active = False
 
     def note_step(self) -> None:
         """交互伪事件计数（不占动态区行）：交互以卡片形式呈现，但 N 口径需含（§3.1：
@@ -700,7 +711,8 @@ class ThinkingView:
                 line if len(line) <= THINKING_LINE_WIDTH else line[:THINKING_LINE_WIDTH] + "…"
                 for line in self._text_buf.split("\n")[-2:]
             ]
-        recent = (self._lines[-(THINKING_MAX_LINES - len(text_tail)):] + text_tail)[-THINKING_MAX_LINES:]
+        window = _thinking_window()
+        recent = (self._lines[-(window - len(text_tail)):] + text_tail)[-window:]
         return Group(*([header] + [f"[glaucous.dim]{escape(line)}[/]" for line in recent]))
 
     def pause(self) -> None:
@@ -1077,9 +1089,9 @@ def _workspace_path_candidates(workspace: Path, arg: str) -> list:
             if prefix and not entry.name.lower().startswith(prefix.lower()):
                 continue
             if entry.is_dir():
-                candidates.append(Completion(rel + "/", start_position=-len(prefix), display=entry.name + "/"))
+                candidates.append(Completion(rel + "/", start_position=-len(arg), display=entry.name + "/"))
             else:
-                candidates.append(Completion(rel, start_position=-len(prefix), display=entry.name))
+                candidates.append(Completion(rel, start_position=-len(arg), display=entry.name))
             if len(candidates) >= _PATH_MAX_CANDIDATES:
                 # 只读提示项：text 永不可匹配（用户继续输入缩小范围）
                 candidates.append(Completion("\x00", display="…（更多，继续输入以缩小范围）"))
@@ -1089,14 +1101,16 @@ def _workspace_path_candidates(workspace: Path, arg: str) -> list:
         return []
 
 
-def make_repl_completer(workspace: Path, model_names: Callable[[], list[str]] | None = None):
+def make_repl_completer(workspace: Path, model_names: Callable[[], list[str]] | None = None,
+                        skill_names: Callable[[], list[str]] | None = None):
     """REPL 补全器（v1.1 R2；反馈 F1 扩展 /model 参数补全与动态模型名）。
 
     - 命令段：/ 开头且无空格 → 命令名前缀补全（meta 取自 commands.COMMAND_META，
       单一数据源）；键入 / 立即列出全部（complete_while_typing 由 session 开启）；
     - 参数段：ARG_COMPLETIONS 注册表——/view 路径补全、/model 模型名前缀过滤
       （候选经 model_names() 动态取值：切换模型后列表跟随，不缓存快照；空格后
-      无输入列全部，前缀无匹配无候选，§1.3）；
+      无输入列全部，前缀无匹配无候选，§1.3）、/build 授权策略两合法参数、
+      /skill 技能名补全（候选经 skill_names() 动态取值，技能创建后跟随刷新）；
     - 其他段（自由对话）：不弹补全；依赖导入失败返回 None（降级无补全，不拒启动）。
     """
     try:
@@ -1129,13 +1143,20 @@ def make_repl_completer(workspace: Path, model_names: Callable[[], list[str]] | 
                     for name in ("auto-approve", "per-action"):
                         if not arg or name.startswith(arg):
                             yield Completion(name, start_position=-len(arg), display_meta="授权策略")
+                elif kind == "skill":
+                    # /skill 技能名补全（v1.1 修订，用户反馈）：候选经 skill_names() 动态取值，
+                    # 创建技能后跟随刷新；arg 含空格（已输入描述）时名字不再前缀匹配 → 无候选
+                    for name in (skill_names() if skill_names else []):
+                        if not arg or name.startswith(arg):
+                            yield Completion(name, start_position=-len(arg), display_meta="技能")
 
         return _ReplCompleter()
     except Exception:  # noqa: BLE001 —— 补全器故障不拒启动：降级无补全输入
         return None
 
 
-def make_prompt_session(workspace: Path, model_names: Callable[[], list[str]] | None = None):
+def make_prompt_session(workspace: Path, model_names: Callable[[], list[str]] | None = None,
+                        skill_names: Callable[[], list[str]] | None = None):
     """构造 prompt_toolkit PromptSession（M3-UI PT_STYLE + R2 补全 + 反馈 F1 交互）。
 
     降级三条件命中返回 None：① GLAUCOUS_INPUT=plain（显式开关）；② stdin
@@ -1189,7 +1210,7 @@ def make_prompt_session(workspace: Path, model_names: Callable[[], list[str]] | 
         session = PromptSession(
             history=input_history,
             style=PT_STYLE,
-            completer=make_repl_completer(workspace, model_names),
+            completer=make_repl_completer(workspace, model_names, skill_names),
             complete_while_typing=True,
             key_bindings=kb,
         )
@@ -1321,8 +1342,12 @@ async def repl(workspace: Path, resume_id: str | None) -> None:
     render_banner(ctx.current_model, prompt_mode(ctx.state))
     # /view 专用沙箱（Workspace 轻量无状态，独立于重建循环）
     view_ws = Workspace(workspace, read_only_extra=config.read_only_extra)
-    # F1：模型名补全候选经闭包动态取值（/model 切换后跟随，不缓存快照）
-    session = make_prompt_session(workspace, model_names=lambda: list(ctx.registry_entries))
+    # F1：模型名/技能名补全候选经闭包动态取值（/model 切换、技能创建后跟随，不缓存快照）
+    session = make_prompt_session(
+        workspace,
+        model_names=lambda: list(ctx.registry_entries),
+        skill_names=lambda: [info.name for info in ctx.skills.infos()],
+    )
 
     while True:
         # 输入区头部（rich，两路径共用）：模型 + ctx 占用行；模式段并入输入行前缀；
@@ -1388,12 +1413,17 @@ async def repl(workspace: Path, resume_id: str | None) -> None:
             if turn_ok:
                 body = "".join(ctx.text_segment).strip()
                 if body:
-                    # §4.4 步骤 3：最终回答流末一次性完整输出（替代逐字流式，偏离经
-                    # 用户确认）；🕊 md 卡片保留（与正文一致属预期）
-                    console.print()
-                    console.print(body, soft_wrap=True, markup=False, emoji=False)
-                    if session is not None:
-                        render_answer_card(body)
+                    if thinking is not None and thinking.was_active:
+                        # v1.1 修订（用户反馈）：渲染前原文归思考过程（/expand 可回看），
+                        # 最终输出仅呈现 🕊 md 卡片；落账在摘要行渲染后，不计入已显示 N（S9 口径）
+                        ctx.session_events.append(("text_segment", {"text": body}))
+                        if session is not None:
+                            render_answer_card(body)
+                    else:
+                        # 降级/管道轮：正文已逐字直打，补收尾换行；TTY 降级仍渲染卡片（R7）
+                        console.print()
+                        if session is not None:
+                            render_answer_card(body)
                 elif ctx.stream_state["printed"]:
                     # 降级/管道轮（r1-B2 修复）：正文已逐字直打，仅补收尾换行；
                     # 不渲染卡片、不重复输出（§4.5：轮末仅用量行）。
