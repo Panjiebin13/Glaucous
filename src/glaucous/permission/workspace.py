@@ -8,6 +8,9 @@
   区外=WRITE（读区外仍需审批，不直接拒绝——FR-13「读取工作区外配置仍需单独同意」）；
 - `.glaucous/` 纳入写排除：write/edit/bash 对运行期目录（会话/审计/方案）一律拒绝，
   agent 不可篡改审计与会话（Day3 Plan §4.6 S4 修复）。
+- v1.1 修订（用户实测反馈）：保护范围收窄——`.glaucous/` 下**唯一开放写的是
+  `skills/`**（FR-28/create-skill 规范目标：用户技能资产，必须可写）；
+  其余（sessions/audit.log/memory.json/plans/outputs/根下新文件）仍一律硬拦截。
 """
 
 from __future__ import annotations
@@ -88,9 +91,22 @@ class Workspace:
         return any(path.is_relative_to(extra) for extra in self._read_only_extra)
 
     def is_protected(self, path: Path) -> bool:
-        """是否命中运行期受保护目录（.glaucous/，agent 不可写，防篡改审计/会话）。"""
+        """是否命中运行期受保护目录（agent 不可写，防篡改审计/会话/方案锚）。
+
+        v1.1 收窄：`.glaucous/skills/` 是技能资产目录（create-skill 规范目标），
+        不属运行期数据，开放写入；其余 `.glaucous/` 下路径一律保护。
+        """
         try:
-            return path.is_relative_to(self._protected)
+            rel = path.relative_to(self._protected)
+        except ValueError:
+            return False
+        return not (rel.parts and rel.parts[0] == "skills")
+
+    def is_skill_asset(self, path: Path) -> bool:
+        """是否位于技能资产目录（`.glaucous/skills/`）：写入后应刷新技能索引。"""
+        try:
+            path.relative_to(self._protected / "skills")
+            return True
         except ValueError:
             return False
 

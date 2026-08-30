@@ -864,8 +864,8 @@ def build_registry(ctx: ReplContext, ws: Workspace, thinking: ThinkingView | Non
     registry.register(ListDirTool(ws, reader=reader))
     registry.register(GrepTool(ws, reader=reader))
     registry.register(BashTool(ws))
-    registry.register(WriteFileTool(ws, reader=reader))
-    registry.register(EditFileTool(ws, reader=reader))
+    registry.register(WriteFileTool(ws, reader=reader, on_skill_write=lambda: ctx.skills.scan()))
+    registry.register(EditFileTool(ws, reader=reader, on_skill_write=lambda: ctx.skills.scan()))
     registry.set_approval_pipeline(ctx.pipeline)
 
     # M2 任务 2.2/2.3：记忆写入与用户求助（回调经 ctx：伪事件记录 + Live 钩子，v1.1 R3/R6）
