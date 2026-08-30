@@ -13,6 +13,8 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+from rich.console import Console
+
 import pytest
 
 from glaucous import cli
@@ -43,6 +45,7 @@ from glaucous.tools.planning import (
     SubmitPlanTool,
 )
 from glaucous.ui.prompts import BASE_PROMPT
+from glaucous.ui.renderer import Renderer
 
 
 # ---------------------------------------------------------------------------
@@ -323,6 +326,30 @@ class TestPromptPlanDecision:
         decision = cli.prompt_plan_decision("方案")
         assert decision.choice == CHOICE_FEEDBACK
         assert decision.feedback is None
+
+
+# ---------------------------------------------------------------------------
+# 默认徽标文案固化（spec §2.3/r1-B1：_mode_badge 双态、toolbar 仅模式态）
+
+
+class TestModeBadgeDefaultCopy:
+    def _renderer(self) -> Renderer:
+        return Renderer(Console())
+
+    def test_build_badge_carries_policy_note(self) -> None:
+        r = self._renderer()
+        assert r._mode_badge("build", POLICY_AUTO_APPROVE).plain == "⬥ build·自动放行"
+        assert r._mode_badge("build", POLICY_PER_ACTION).plain == "⬥ build·每次审批"
+
+    def test_plan_badge_mode_only(self) -> None:
+        assert self._renderer()._mode_badge("plan", None).plain == "◆ plan"
+
+    def test_toolbar_mode_only_without_policy_note(self) -> None:
+        # toolbar 仅模式态（spec §2.3）：policy 附注不进 toolbar
+        r = self._renderer()
+        line = r.toolbar_text("build", POLICY_AUTO_APPROVE)
+        assert "⬥ build" in line and "自动放行" not in line
+        assert "◆ plan" in r.toolbar_text("plan", None)
 
 
 # ---------------------------------------------------------------------------

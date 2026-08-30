@@ -130,3 +130,9 @@
 
 - [ ] S10 loop.py L145~146 注释含「三选一①②」与「自然终止回归在上方分支 emit」两处失实表述，随 M1 实现一并修正（统一出口保留但触发场景变化）
 - [ ] 范围裁剪偿还项（spec §〇）：授权策略持久化配置面（如 GLAUCOUS_APPROVAL_POLICY），关联计划表 V1.1-M3 任务 3.1 落地后评估
+
+### V1.1-M1 模式基座代码评审建议项（r1，见 docs/reviews/202608310000-code-review-v11-m1-mode-base-r1.md；B1 已修复关闭）
+
+- [ ] S1 文案措辞与 spec 模板存在超集式改写（语义等价）：planning.py 反馈回喂尾句、cli.py 方案卡选项「提出修改意见」、commands.py /plan 摘要，后续统一口径
+- [ ] S2 test_mode_default_build.py test_approve_in_build_touches_no_state 断言空洞（confirm 闭包未接 state，断言恒真），改按 PLAN 下批准收敛规则写法使其真实约束
+- [ ] S3 「三选一」字样以退役声明形式残留在 modes.py/planning.py/cli.py 等 5 处注释/docstring（spec §7.3「随改随清」口径合规），后续文档轮次统一清理
