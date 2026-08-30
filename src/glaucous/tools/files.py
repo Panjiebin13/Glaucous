@@ -55,17 +55,14 @@ class ReadFileTool(Tool):
         return self._workspace.resolve(path)
 
     def build_approval(self, args: dict[str, Any], mode: str) -> ApprovalAction | None:
-        """区外读触发审批（kind=file_read，FR-13「读取工作区外配置仍需单独同意」）。
+        """读审批（v1.1 修订，用户决策 2026-08-30，FR-13 语义更新）：
 
-        区内/只读白名单 = SAFE 免审；区外 = WRITE 走审批（auto-approve 下仍单独确认）；
-        受保护目录（.glaucous/）读 = DANGEROUS（与 bash 分类器一致，防审计/会话被无感读取，S-C 修复）。
+        区内读（含 .glaucous/ 运行日志）= SAFE 免审——读无完整性风险，
+        保护语义收窄为写完整性；区外 = WRITE 走审批（可同类型豁免）。
         """
         path = str(args.get("path", ""))
         if not path:
             return None
-        resolved = self._workspace.resolve(path)
-        if self._workspace.is_protected(resolved):
-            return ApprovalAction(kind="file_read", target=path, detail=f"read_file {path}", risk=Risk.DANGEROUS)
         risk = self._workspace.classify_path(path)
         if risk == Risk.SAFE:
             return None
@@ -118,14 +115,11 @@ class ListDirTool(Tool):
         self._reader = reader
 
     def build_approval(self, args: dict[str, Any], mode: str) -> ApprovalAction | None:
-        """区外目录浏览触发审批（kind=file_read 语义，FR-13）。
+        """读审批（v1.1 修订，用户决策 2026-08-30，与 ReadFileTool 同矩阵）：
 
-        受保护目录（.glaucous/）浏览 = DANGEROUS（S-C 修复，与 bash 一致）。
+        区内浏览（含 .glaucous/）= SAFE 免审；区外 = WRITE 走审批（可同类型豁免）。
         """
         path = str(args.get("path", "."))
-        resolved = self._workspace.resolve(path)
-        if self._workspace.is_protected(resolved):
-            return ApprovalAction(kind="file_read", target=path, detail=f"list_dir {path}", risk=Risk.DANGEROUS)
         risk = self._workspace.classify_path(path)
         if risk == Risk.SAFE:
             return None

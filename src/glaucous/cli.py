@@ -26,6 +26,7 @@ from typing import Any, Callable
 
 from .agent.loop import AgentLoop
 from .agent.state import MODE_PLAN, POLICY_AUTO_APPROVE, POLICY_PER_ACTION, SessionState
+from .agent.subagent import SubagentRunner
 from .commands import COMMAND_META, ReplContext, handle_command, begin_turn
 from .config import ConfigError, load_config
 from .context.budget import BudgetReport, build_report
@@ -53,6 +54,7 @@ from .tools.planning import (
 from .tools.search import GrepTool
 from .tools.shell import BashTool
 from .tools.skill_tool import LoadSkillTool
+from .tools.spawn_agent import SpawnAgentTool
 from .ui.prompts import build_system_prompt
 
 # 输入层（M3 3.3）：主输入 prompt_toolkit（↑↓ 历史/Ctrl+R 搜索/语义样式/斜杠补全），
@@ -269,6 +271,12 @@ def make_ask_callback(ctx: ReplContext):
         try:
             console.print()
             table = make_card(":dove: 想请教你")
+            if ctx.active_agent != "主 agent":
+                # v1.1-M2（FR-62，概设 §8.3）：子 agent 归属标注卡首行
+                table.add_row(
+                    "归属",
+                    f"[glaucous.sub]🕊 子 agent（任务：{escape(ctx.active_task[:40])}）[/]",
+                )
             # 问题正文走 Markdown（markdown.* 主题色板；方括号天然安全，无需 escape）
             if question.strip():
                 table.add_row(Markdown(question))
@@ -322,6 +330,12 @@ def make_decision_callback(ctx: ReplContext):
             }.get(action.risk, "")
             console.print()
             table = make_card(key_value=True)
+            if ctx.active_agent != "主 agent":
+                # v1.1-M2（FR-62，概设 §8.3）：子 agent 归属标注卡首行
+                table.add_row(
+                    "归属",
+                    f"[glaucous.sub]🕊 子 agent（任务：{escape(ctx.active_task[:40])}）[/]",
+                )
             table.add_row(
                 "需要确认",
                 f"[glaucous.text][bold]{escape(str(action.kind))} {escape(str(action.target))}[/][/]",
@@ -575,6 +589,53 @@ def render_event(event: str, payload: dict[str, Any], state: SessionState) -> No
             f"[{level_style}]  {ring} ctx 占用 {round(payload.get('percent', 0.0) * 100)}%"
             f"（{payload.get('used', '?')}/{payload.get('limit', '?')} tokens）[/]"
         )
+    elif event == "sub_start":
+        # v1.1-M2（概设 §9 意象）：子 agent 派发行
+        task = str(payload.get("task", ""))
+        console.print(
+            f"[glaucous.sub]  🕊 子 agent 出发 · {escape(str(payload.get('agent_id', '')))} "
+            f"{escape(task[:60])}[/]"
+        )
+    elif event == "sub_event":
+        # 子 agent 中间过程：两格缩进复用既有紧凑形态（text 不直出，仅报告承担）
+        agent_id = str(payload.get("agent_id", ""))
+        inner = str(payload.get("event", ""))
+        inner_payload = payload.get("payload", {}) or {}
+        if inner == "text":
+            # /expand 重放呈现：折叠摘要形态（spec §5.2，r1-B3）；
+            # [child-N] 字面量需 escape（rich 未知标签会被静默吞，r2-S1）
+            console.print(
+                f"[glaucous.dim]  {escape(f'[{agent_id}]')} 正文生成中…[/]"
+            )
+            return
+        if inner == "tool_start":
+            call = inner_payload["call"]
+            brief = _tool_brief(call.arguments)
+            console.print(
+                f"\n  ⏺ [glaucous.tool]{escape(agent_id)}·{escape(call.name)}[/] "
+                f"[glaucous.text]{escape(brief)}[/]"
+            )
+        elif inner == "tool_end":
+            result = inner_payload["result"]
+            lines = (result.content or "").splitlines()
+            if result.ok:
+                summary = " | ".join(lines[-RESULT_TAIL_LINES:]) if lines else "（无输出）"
+                if len(lines) > RESULT_TAIL_LINES:
+                    summary = f"…共 {len(lines)} 行 | {summary}"
+            else:
+                summary = f"✘ {result.content}"
+            level_style = "glaucous.ok" if result.ok else "glaucous.error"
+            console.print(f"[{level_style}]      ⎿ {escape(summary)}[/]")
+        else:
+            # [child-N] 字面量需 escape（rich 未知标签静默吞，r2-S1）
+            console.print(f"[glaucous.dim]    {escape(f'[{agent_id}]')} {escape(_thinking_line(inner, inner_payload))}[/]")
+    elif event == "sub_end":
+        # 子 agent 完成行：报告首段摘要（海草绿/陶土红按 ok）
+        level_style = "glaucous.ok" if payload.get("ok", True) else "glaucous.error"
+        console.print(
+            f"[{level_style}]  ⎿ 子 agent {escape(str(payload.get('agent_id', '')))} 完成 · "
+            f"{escape(str(payload.get('brief', '')))}[/]"
+        )
     elif event == "tool_start":
         call = payload["call"]
         brief = call.arguments if len(call.arguments) <= 80 else call.arguments[:80] + "…"
@@ -616,6 +677,17 @@ def _thinking_line(event: str, payload: dict[str, Any]) -> str:
     if event == "budget":
         ring, _ = ctx_ring(payload.get("percent", 0.0))  # 圆环取形与 render_event 同源（不硬编码）
         return f"{ring} ctx 占用 {round(payload.get('percent', 0.0) * 100)}%（{payload.get('used', '?')}/{payload.get('limit', '?')} tokens）"
+    if event == "sub_start":
+        return f"🕊 子 agent 出发 · {payload.get('agent_id', '')} {str(payload.get('task', ''))[:60]}"
+    if event == "sub_end":
+        mark = "✓" if payload.get("ok", True) else "✘"
+        return f"⎿ 子 agent {payload.get('agent_id', '')} 完成 {mark} · {payload.get('brief', '')}"
+    if event == "sub_event":
+        inner = str(payload.get("event", ""))
+        if inner == "text":
+            return f"[{payload.get('agent_id', '')}] 正文生成中…"
+        line = _thinking_line(inner, payload.get("payload", {}) or {})
+        return f"[{payload.get('agent_id', '')}] {line}"
     if event == "tool_start":
         call = payload["call"]
         return f"⏺ {call.name} {_tool_brief(call.arguments)}"
@@ -890,11 +962,20 @@ def render_prompt_header(model_name: str, report: BudgetReport) -> None:
 # ---------------------------------------------------------------------------
 
 
-def build_registry(ctx: ReplContext, ws: Workspace, thinking: ThinkingView | None = None) -> ToolRegistry:
-    """装配全量工具：只读四件 + 双写 + submit_plan + 交互/记忆/回取 + load_skill。
+def build_registry(
+    ctx: ReplContext,
+    ws: Workspace,
+    thinking: ThinkingView | None = None,
+    decision_callback=None,
+    on_event=None,
+) -> ToolRegistry:
+    """装配全量工具：只读四件 + 双写 + submit_plan + 交互/记忆/回取 + load_skill + spawn_agent。
 
     权限管线注入 registry（dispatch 层统一审批）；交互回调经 ctx 注入；
     read_output/read_plan 的目录由系统派生（无沙箱面，Day4 Plan D8）。
+    v1.1-M2：spawn_agent 仅注册给主 agent（子 registry 由 runner 派生时排除，
+    FR-64 防嵌套）；runner 组装依赖决策回调与主 on_event（由 rebuild_loop 传入，
+    与主 pipeline / 主 loop 同源同一闭包）。
     """
     registry = ToolRegistry()
     reader = ReadFileTool(ws)
@@ -915,19 +996,49 @@ def build_registry(ctx: ReplContext, ws: Workspace, thinking: ThinkingView | Non
     # M3 任务 3.5：技能惰性加载通道（两段式：索引已注入，正文经此取回）
     registry.register(LoadSkillTool(ctx.skills))
 
+    # v1.1-M2：spawn_agent 派发通道（FR-60~64，概设 §8）。仅主 agent 注册；
+    # decision_callback/on_event 与主 pipeline/主 loop 同源，避免双闭包漂移
+    runner = SubagentRunner(
+        llm=ctx.llm,
+        parent_registry=registry,
+        state=ctx.state,
+        audit=ctx.audit,
+        decision_callback=decision_callback,
+        workspace=ctx.workspace,
+        rules=load_rules(ctx.workspace),
+        max_steps=ctx.config.max_steps,
+        context_limit=ctx.config.context_limit,
+        outputs_dir=ctx.outputs_dir,
+        plans_dir=ctx.plans_dir,
+        on_event=on_event,
+        ctx=ctx,
+    )
+    registry.register(SpawnAgentTool(runner))
+
     def confirm(plan: str) -> PlanDecision:
         """二选一交互（v1.1-M1，FR-38）：批准执行 / 修改意见。
 
-        状态切换收敛（spec §4.3）：PLAN 下批准才 enter_build()（策略维持现状，
+        状态切换收敛（spec §4.3）：active state（v1.1-M2：子 agent 派发期间为
+        子副本 ctx.active_state，主 agent 路径回退 ctx.state——不捕获实例，
+        /clear、/resume 整体替换后仍正确，D8）下批准才 enter_build()（策略维持现状，
         FR-39 口头确认出口；切换反馈由 loop 统一出口的 mode_changed 事件承担，
         r1-B2 方案 c），BUILD 下批准不触碰状态；删除旧版按选项落位策略的
         两处 enter_build——授权策略仅经 /build 显式改变。
         v1.1 R6：TTY 非降级时箭头选择（取消 = 修改意见，feedback 落「用户取消」，
         r2-S4：PlanDecision 无 reason 字段）；R3：阻塞交互前后暂停/恢复思考区，
         并记录 plan_decision 伪事件。
+        v1.1-M2（spec §4.2，r1-B1/r2-B1）：子 agent 派发期间先打归属行（🕊 子 agent
+        任务摘要），两条决策路径（箭头/数字回退）都可见；归属行必须在 pause()
+        之后打印——折叠区擦除协议会吞掉 pause 之前刚打的行（r2-B1 实证）。
         """
         ctx.live_hooks["pause"]()
         try:
+            # v1.1-M2（spec §4.2）：归属行在 pause 后、try 内打印（r3-S1：
+            # 打印异常不至于绕过 finally resume，与 ask/decide 卡结构对齐）
+            if ctx.active_agent != "主 agent":
+                console.print(
+                    f"[glaucous.sub]  🕊 子 agent（任务：{escape(ctx.active_task[:40])}）[/]"
+                )
             decision: PlanDecision | None = None
             if _arrow_mode():
                 idx = select_with_arrows("请选择：", ["批准执行", "提出修改意见"])
@@ -940,8 +1051,11 @@ def build_registry(ctx: ReplContext, ws: Workspace, thinking: ThinkingView | Non
                     )
             else:
                 decision = prompt_plan_decision(plan)
-            if decision.choice == CHOICE_APPROVE and ctx.state.mode == MODE_PLAN:
-                ctx.state.enter_build()  # FR-39 口头确认：批准即回 Build（策略不变）
+            # v1.1-M2：批准作用于 active state（子 agent 派发期间 = 子副本，
+            # 主 agent 路径为 ctx.state——None 哨兵动态回退，不捕获实例，D8）
+            active_state = ctx.active_state or ctx.state
+            if decision.choice == CHOICE_APPROVE and active_state.mode == MODE_PLAN:
+                active_state.enter_build()  # FR-39 口头确认：批准即回 Build（策略不变）
             flush_text_segment(ctx)  # §4.2 触发点 2：伪事件前保序落账正文段
             ctx.session_events.append(("plan_decision", {
                 "summary": ("方案确认 → 批准" if decision.choice == CHOICE_APPROVE
@@ -967,6 +1081,10 @@ def make_on_event(ctx: ReplContext, ws: Workspace, thinking: ThinkingView | None
     诊断契约），照常落账。tool_end md 卡片已删除（决策记录②），一律走思考区摘要。
     """
 
+    # 子正文摘要行去重状态（r3-B1：必须活在 make_on_event 闭包层——
+    # 声明在 on_event 体内则每次事件重建空列表，去重永不生效）
+    child_note: list[str] = []
+
     def on_event(event: str, payload: dict[str, Any]) -> None:
         if event == "text":
             ctx.stream_state["printed"] = True
@@ -989,6 +1107,23 @@ def make_on_event(ctx: ReplContext, ws: Workspace, thinking: ThinkingView | None
             if thinking is not None:
                 thinking.note_step()
             return
+        if event == "sub_event" and payload.get("event") == "text":
+            # v1.1-M2（spec §5.2，r1-B3）：子正文增量不流式直出，仅折叠摘要——
+            # 折叠区经 thinking.add 单行滚动；降级/管道直打一行 dim。
+            # v1.1 修订（用户决策 2026-08-30）：text 增量无回看价值（子正文全文
+            # 不回传、增量不拼接），落账同步去重——每 agent 只落一条，/expand 不刷屏
+            agent = str(payload.get("agent_id", ""))
+            if not child_note or child_note[0] != agent:
+                child_note.clear()
+                child_note.append(agent)
+                ctx.session_events.append((event, payload))
+                if thinking is not None and thinking.active:
+                    thinking.add(event, payload)
+                else:
+                    console.print(
+                        f"[glaucous.dim]  {escape(f'[{agent}]')} 正文生成中…[/]"
+                    )
+            return
         if event == "budget":
             ctx.last_budget = payload
         if event == "tool_start":
@@ -1008,13 +1143,19 @@ def rebuild_loop(ctx: ReplContext, thinking: ThinkingView | None = None) -> None
     state 可能已被整体替换（/clear 重置、/resume 恢复）：管线随新 state
     重建，回调经 ctx 间接引用自动跟随（闭包不捕获旧对象，D8）；
     重建后旧 loop 对象不再被任何入口持有。thinking 为思考区动态区（折叠关闭时为 None）。
+    v1.1-M2：决策回调与 on_event 先建一份，同源传入主 pipeline、spawn runner
+    与主 loop（spawn_agent 报告经主 on_event 的 sub_* 通道渲染）。
     """
     ws = Workspace(ctx.workspace, read_only_extra=ctx.config.read_only_extra)
-    ctx.pipeline = ApprovalPipeline(ctx.state, callback=make_decision_callback(ctx), audit=ctx.audit)
-    registry = build_registry(ctx, ws, thinking=thinking)
+    on_event = make_on_event(ctx, ws, thinking)
+    decision_callback = make_decision_callback(ctx)
+    ctx.pipeline = ApprovalPipeline(ctx.state, callback=decision_callback, audit=ctx.audit)
+    registry = build_registry(
+        ctx, ws, thinking=thinking, decision_callback=decision_callback, on_event=on_event
+    )
     ctx.loop = AgentLoop(
         ctx.llm, registry, ctx.history, ctx.state,
-        max_steps=ctx.config.max_steps, on_event=make_on_event(ctx, ws, thinking),
+        max_steps=ctx.config.max_steps, on_event=on_event,
         context_limit=ctx.config.context_limit,
         outputs_dir=ctx.outputs_dir, plans_dir=ctx.plans_dir,
     )

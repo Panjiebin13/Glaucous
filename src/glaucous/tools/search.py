@@ -44,16 +44,13 @@ class GrepTool(Tool):
         self._reader = reader
 
     def build_approval(self, args: dict[str, Any], mode: str) -> ApprovalAction | None:
-        """区外搜索触发审批（kind=file_read 语义，FR-13）。
+        """搜索审批（v1.1 修订，用户决策 2026-08-30，与 ReadFileTool 同矩阵）：
 
-        受保护目录（.glaucous/）搜索 = DANGEROUS（S-C 修复，与 bash 一致）。
+        区内搜索（含 .glaucous/）= SAFE 免审；区外 = WRITE 走审批（可同类型豁免）。
         """
         path = str(args.get("path", ""))
         if not path:
             return None
-        resolved = self._workspace.resolve(path)
-        if self._workspace.is_protected(resolved):
-            return ApprovalAction(kind="file_read", target=path, detail=f"grep {path}", risk=Risk.DANGEROUS)
         risk = self._workspace.classify_path(path)
         if risk == Risk.SAFE:
             return None

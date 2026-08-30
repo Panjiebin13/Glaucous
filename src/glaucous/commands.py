@@ -133,6 +133,12 @@ class ReplContext:
     )
     # usage 计入门控：/compact 压缩期间置 False（压缩发生在轮间，不计入任务轮口径）
     counting_usage: bool = True
+    # —— v1.1-M2：子 agent 归属切换（FR-62，概设 §8.3）——
+    # runner.run 期间替换、finally 恢复哨兵；active_state=None 语义 = 动态回退
+    # ctx.state（confirm 闭包读，永不捕获实例——/clear、/resume 整体替换后仍正确，D8）
+    active_state: SessionState | None = None
+    active_agent: str = "主 agent"
+    active_task: str = ""
 
 
 def begin_turn(ctx: ReplContext) -> None:

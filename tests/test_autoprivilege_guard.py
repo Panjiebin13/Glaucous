@@ -1,7 +1,8 @@
 """auto-approve 守卫单测（任务 1.7 / 债务项「auto-approve 守卫」，FR-10 设计底线）。
 
-覆盖：auto-approve 放行区内写；仍拦 DANGEROUS；仍拦区外读（file_read 载体）；
-同类型豁免不越过守卫优先级。
+覆盖：auto-approve 放行区内写；仍拦 DANGEROUS；同类型豁免不越过守卫优先级。
+v1.1 修订（用户决策 2026-08-30）：区外读（WRITE+file_read）移出守卫清单——
+auto-approve 下静默放行；per-action 下弹卡且可「同意同类型」；区外写仍 DANGEROUS。
 """
 
 from __future__ import annotations
@@ -11,7 +12,7 @@ from pathlib import Path
 import pytest
 
 from glaucous.permission.approval import ApprovalAction, ApprovalDecision, ApprovalPipeline, AuditLog
-from glaucous.permission.modes import POLICY_AUTO_APPROVE, SessionState
+from glaucous.permission.modes import POLICY_AUTO_APPROVE, POLICY_PER_ACTION, SessionState
 from glaucous.permission.risk import Risk
 
 
@@ -52,14 +53,26 @@ class TestAutoApprove:
         assert not verdict.allowed
         assert len(asked) == 1
 
-    def test_outside_read_still_confirmed(self, auto_state: SessionState, tmp_path: Path) -> None:
-        # 场景 C：读取工作区外配置仍需单独同意（file_read + WRITE → 守卫）
-        pipeline, asked = make_pipeline(
-            auto_state, tmp_path / "audit.log", [ApprovalDecision(choice="approve")]
-        )
+    def test_outside_read_auto_approved(self, auto_state: SessionState, tmp_path: Path) -> None:
+        # v1.1 修订（用户决策 2026-08-30）：区外读移出守卫——auto-approve 静默放行
+        pipeline, asked = make_pipeline(auto_state, tmp_path / "audit.log", [])
         action = ApprovalAction(kind="file_read", target="D:/outside/cfg.yml", risk=Risk.WRITE)
         verdict = pipeline.gate(action)
-        assert verdict.allowed  # 用户单独同意后放行
+        assert verdict.allowed
+        assert asked == []  # 不弹卡
+
+    def test_outside_read_type_exempt_per_action(self, tmp_path: Path) -> None:
+        # v1.1 修订：per-action 下区外读弹卡且可「同意同类型」批量豁免
+        state = SessionState()
+        state.enter_build(POLICY_PER_ACTION)
+        pipeline, asked = make_pipeline(
+            state, tmp_path / "audit.log", [ApprovalDecision(choice="approve_type")]
+        )
+        first = ApprovalAction(kind="file_read", target="D:/outside/cfg.yml", risk=Risk.WRITE)
+        assert pipeline.gate(first).allowed
+        assert len(asked) == 1
+        second = ApprovalAction(kind="file_read", target="D:/outside/other.yml", risk=Risk.WRITE)
+        assert pipeline.gate(second).allowed  # 同类型豁免，不再询问
         assert len(asked) == 1
 
     def test_dangerous_approve_no_type_leak(self, auto_state: SessionState, tmp_path: Path) -> None:

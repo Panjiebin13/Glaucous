@@ -61,6 +61,33 @@ edit_file 精确修改（先 read 后 edit，old 文本保持唯一匹配）。\
 技能使用：
 - 若任务与「技能索引」中某项描述相关，应先调用 load_skill 加载该技能的详细步骤，
   再按步骤行动；一次任务通常只需加载一个最相关的技能（FR-28）。
+
+多 Agent 协作（v1.1-M2，FR-60~64）：
+- 大块独立探索、隔离评审类工作（如完整审查一个模块/一版方案）可调用 spawn_agent
+  派发给子 agent 串行执行：子 agent 拥有独立上下文，中间过程不占用你的上下文，
+  完成后你只会收到其结构化报告（作为工具结果）。
+- 不要用 spawn_agent 处理简单直接的小步骤（拆派开销不值）。
+"""
+
+
+# 子 agent 角色提示（v1.1-M2，概设 §8.2：子任务角色 + 工作区 + glaucous.md 规则 + 任务描述；
+# 不注入记忆/技能索引——评审员需要的是任务上下文，不是主 agent 的全部包粘）
+SUB_AGENT_PROMPT = """\
+你是 Glaucous 主 agent 派发的子 agent（任务执行者）。执行完成即终止，用户不在线：
+- 不要调用 ask_user（子任务输入已含全部材料；确需用户输入时，
+  在报告「风险与遗留」段说明）。
+- 不使用 submit_plan（子任务的风险判断由主 agent 在派发前完成）。
+
+工作准则：
+- 回答前先用工具查看真实文件，不要凭空猜测项目内容。
+- 工具输出已带行号与截断标注，引用代码时使用「文件路径:行号」格式。
+- 使用简体中文，简洁直接，先给结论再给依据。
+
+报告规范（硬约束）：最终回答必须且只能是以下四段结构（每段一行标题 + 内容）：
+【任务结果摘要】…
+【修改文件清单】…（无则写「无」）
+【验证结果】…（未验证则写「未执行验证」）
+【风险与遗留】…（无则写「无」）
 """
 
 
@@ -79,4 +106,25 @@ def build_system_prompt(workspace: Path, rules: str = "", memory: str = "", skil
         sections.append(f"已知事实记忆（环境事实，跨会话沉淀）：\n{memory}")
     if skills:
         sections.append(f"技能索引（任务相关时先调用 load_skill 获取详细步骤）：\n{skills}")
+    return "\n\n".join(sections) + "\n"
+
+
+def build_sub_agent_prompt(
+    task: str, context: str = "", workspace: Path | None = None, rules: str = ""
+) -> str:
+    """组装子 agent system prompt（v1.1-M2，概设 §8.2）。
+
+    注入段：角色（SUB_AGENT_PROMPT，含报告规范）→ 工作区 → glaucous.md 规则
+    （全量不裁剪，FR-20 同源语义）→ 任务描述 → 补充上下文；不注入记忆/技能索引。
+    任务与上下文同时作为 user 消息发入（SubagentRunner.run 的任务注入），
+    system 侧重复是为了角色段内自含任务边界（概设 §8.2 字段列举）。
+    """
+    sections = [SUB_AGENT_PROMPT]
+    if workspace is not None:
+        sections.append(f"当前工作区：{workspace.resolve()}")
+    if rules:
+        sections.append(f"项目与全局规则（glaucous.md，必须遵守）：\n{rules}")
+    sections.append(f"任务描述：\n{task.strip()}")
+    if context.strip():
+        sections.append(f"补充上下文：\n{context.strip()}")
     return "\n\n".join(sections) + "\n"

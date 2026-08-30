@@ -59,6 +59,37 @@ class TestClassifierScope:
         assert clf.classify("echo fake > .glaucous/audit.log")[0] == Risk.DANGEROUS
 
 
+class TestReadScope:
+    """v1.1 修订（用户决策 2026-08-30）：保护语义收窄为写完整性——
+    区内读（含 .glaucous/ 运行日志）一律放行；区外读 WRITE 可同类型豁免。"""
+
+    def test_read_tools_inside_protected_no_approval(self, ws: Workspace) -> None:
+        from glaucous.tools.files import ListDirTool, ReadFileTool
+        from glaucous.tools.search import GrepTool
+
+        reader = ReadFileTool(ws)
+        assert reader.build_approval({"path": ".glaucous/audit.log"}, "build") is None
+        assert ListDirTool(ws).build_approval({"path": ".glaucous"}, "build") is None
+        assert GrepTool(ws).build_approval({"path": ".glaucous"}, "build") is None
+
+    def test_outside_read_write_risk(self, ws: Workspace, tmp_path: Path) -> None:
+        from glaucous.tools.files import ReadFileTool
+
+        action = ReadFileTool(ws).build_approval({"path": "../outside.py"}, "build")
+        assert action is not None
+        assert action.risk == Risk.WRITE  # 可同类型豁免（不再 DANGEROUS 守卫）
+
+    def test_bash_read_protected_safe(self, tmp_path: Path) -> None:
+        clf = CommandClassifier(Workspace(tmp_path))
+        risk, _ = clf.classify("head -c 200 .glaucous/agents/20260830-180006-030c.jsonl")
+        assert risk == Risk.SAFE  # 读运行日志与区内普通读同等
+
+    def test_bash_write_protected_still_dangerous(self, tmp_path: Path) -> None:
+        clf = CommandClassifier(Workspace(tmp_path))
+        risk, _ = clf.classify("rm .glaucous/audit.log")
+        assert risk == Risk.DANGEROUS  # 写完整性保护不变
+
+
 class TestWriteToolSkillRefresh:
     @pytest.mark.asyncio
     async def test_write_skill_refreshes_index(self, ws: Workspace) -> None:

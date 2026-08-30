@@ -151,6 +151,10 @@ class ToolRegistry:
     def register(self, tool: Tool) -> None:
         self._tools[tool.name] = tool
 
+    def all_tools(self) -> list[Tool]:
+        """全部已注册工具实例（v1.1-M2：子 registry 派生用，概设 §8.2）。"""
+        return list(self._tools.values())
+
     def tool_schemas(self, mode: str | None = None) -> list[dict[str, Any]]:
         """生成 OpenAI tools 声明（声明层：发给 API 的工具定义）。
 

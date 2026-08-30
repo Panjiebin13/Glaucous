@@ -137,8 +137,26 @@
 - [ ] S2 test_mode_default_build.py test_approve_in_build_touches_no_state 断言空洞（confirm 闭包未接 state，断言恒真），改按 PLAN 下批准收敛规则写法使其真实约束
 - [ ] S3 「三选一」字样以退役声明形式残留在 modes.py/planning.py/cli.py 等 5 处注释/docstring（spec §7.3「随改随清」口径合规），后续文档轮次统一清理
 
-### 产品化打磨遗留（用户 WSL 验收反馈 2026-08-30）
+### V1.1-M2 多 Agent 基础代码评审建议项（r1，见 docs/reviews/202608301600-code-review-v11-m2-subagent-r1.md；B1/B2/B3 已修复、S2 已顺带关闭，待 r2 聚焦复审）
 
+- [ ] S1 record_denial 审计事件缺归属字段（agent/agent_task）：Plan 拦截路径与 §六「agent 恒有」存在落差（permission/approval.py）
+- [ ] S3 SubAgentInfo 死代码：全仓零消费点，接入 metadata 或注明 M5 预留（agent/subagent.py）
+- [ ] S4 报告清单连接符用「、」而 spec §3.3 为「逗号连接」，且 path 未做相对化（措辞级偏差，agent/subagent.py）
+- [ ] S5 提问卡归属行使单列卡被 rich 自动扩为两列、其余行第二格全空（布局瑕疵，cli.py + theme.py）
+- [ ] S6 子 loop 异常路径无 sub_end(ok=False) 配对：UI 留下无完成行的「🕊 出发」（agent/subagent.py）
+- [ ] S7 测试完备性：token 估算增量断言、tool_schemas() 口径断言、auto-approve 静默放行显式断言（tests/test_subagent.py）
+- [ ] r4-S1 去重回归用例未覆盖降级直打分支（thinking=None 路径），后续补测（cli.py + tests/test_subagent.py）
+
+### V1.1-M2 多 Agent 基础（8/31）
+
+- [x] 2.1 tools/spawn_agent.py：SpawnAgentTool（task/context 参数、SAFE 风险级、全模式可用、仅主 agent 注册）（FR-60）
+- [x] 2.2 agent/subagent.py：SubagentRunner（独立 History + .glaucous/agents/ 会话文件、registry 去 spawn_agent 防嵌套、独立 SessionState 快照复制父当前值、复用父 LLMClient）（FR-61/64）
+- [x] 2.3 权限继承：ApprovalPipeline agent_label/agent_task + ApprovalAction origin 归属标注 + 审计 agent 字段 + ReplContext.active_state 副作用隔离（submit_plan 批准只翻子副本）+ 审批/方案/提问三卡归属标注（FR-62）
+- [x] 2.4 结构化报告（四段 ≤400 字）回传 + sub_start/sub_event/sub_end 事件通道（折叠摘要 + 降级直打 + /expand 落账）+ 父史零污染（FR-63）
+- [x] 2.5 tests/test_subagent.py（14 用例）；全量 206 passed（基线 192 守恒，WSL 环境）；spec 评审 3 轮 + 代码评审 4 轮通过（docs/reviews/202608301500-* 与 202608301600-*）
+- [x] 2.6 e2e 实测反馈修复三件（用户决策 2026-08-30，全量 212 passed；详见 spec §十交付后修订）：R1 报告上限 400→1000 字 + 超限落盘 outputs/ 与 read_output 回取提示；R2 子正文增量落账去重（/expand 不刷屏）；R3 权限矩阵修订——区内读一律放行（含 .glaucous/）、区内写维持现状（checkpoint 后再评估）、区外读可同类型豁免、区外写维持不可批量豁免（FR-13 文字修订待办）
+
+### 产品化打磨遗留（用户 WSL 验收反馈 2026-08-30）
 - [x] 箭头选择重绘残影（实测：两个「请选择：」、选项重复、提示行残留）——根因：重绘偏移漏计提示行，旧块被挤下去逐次叠加。已修复：select_with_arrows 整块重绘（问题+选项+提示行）+ \x1b[J 清屏到底 + CJK 按显示宽度截行防折行（回归测试 TestRedrawProtocol），待用户真实终端复核
 - [x] /view 路径补全重复前缀：已选 /docs 后在其下继续补全出现 /docs/docs/…——已修复：候选 start_position 统一改为替换整个已输入参数（-len(arg)），不再追加在已输入目录后（回归测试 test_start_position_replaces_full_arg）
 - [x] /skill 技能名参数补全：ARG_COMPLETIONS 增 skill 段已落地（候选来自 SkillRegistry.infos()，前缀过滤，动态取值随技能创建刷新；TestSkillCompletion 4 用例）；补全菜单多行展示 + 默认选中第一条，↑↓ 换选、Enter 落入、再 Enter 执行

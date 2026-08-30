@@ -257,7 +257,8 @@ class CommandClassifier:
         """判定命令内路径参数风险：
         - 写操作指向受保护目录（.glaucous/）→ DANGEROUS（防篡改审计）
         - 写操作指向区外 → DANGEROUS
-        - 读操作指向区外 → WRITE（读区外需审批）
+        - 读操作指向区外 → WRITE（读区外需审批，可同类型豁免，v1.1 修订）
+        - 读操作指向受保护目录 → SAFE（v1.1 用户决策：区内读一律放行）
         - 区内 → SAFE
 
         先剥离引号（'/"）再 resolve：引号包裹是 shell 最常见写法，若保留引号
@@ -277,7 +278,9 @@ class CommandClassifier:
         except (OSError, RuntimeError):
             return Risk.DANGEROUS if writing else Risk.WRITE
         if self._workspace.is_protected(resolved):
-            return Risk.DANGEROUS
+            # v1.1 修订（用户决策 2026-08-30）：保护语义收窄为写完整性——
+            # 读 .glaucous/ 运行日志（审计/会话）与区内普通读同等（SAFE）
+            return Risk.DANGEROUS if writing else Risk.SAFE
         if not self._workspace.is_within(resolved):
             return Risk.DANGEROUS if writing else Risk.WRITE
         return Risk.SAFE

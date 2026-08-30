@@ -172,19 +172,23 @@ class History:
     # -- 会话文件管理 -------------------------------------------------------
 
     @staticmethod
-    def create_session_file(workspace: Path) -> Path:
-        """生成新会话文件路径：.glaucous/sessions/<时间戳>-<随机后缀>.jsonl。"""
+    def create_session_file(workspace: Path, subdir: str = "sessions") -> Path:
+        """生成新会话文件路径：.glaucous/<subdir>/<时间戳>-<随机后缀>.jsonl。
+
+        subdir 默认 "sessions"（主会话）；v1.1-M2 子 agent 会话用 "agents"
+        （概设 §8.2：独立会话文件，不进会话索引）。
+        """
         import secrets
 
-        sessions_dir = workspace / ".glaucous" / "sessions"
+        sessions_dir = workspace / ".glaucous" / subdir
         sessions_dir.mkdir(parents=True, exist_ok=True)
         stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
         return sessions_dir / f"{stamp}-{secrets.token_hex(2)}.jsonl"
 
     @classmethod
-    def create(cls, system_prompt: str, workspace: Path) -> "History":
+    def create(cls, system_prompt: str, workspace: Path, subdir: str = "sessions") -> "History":
         """创建带持久化的新会话：首行写 session_meta。"""
-        session_file = cls.create_session_file(workspace)
+        session_file = cls.create_session_file(workspace, subdir)
         session_id = session_file.stem
         history = cls(system_prompt=system_prompt, session_file=session_file, session_id=session_id)
         meta = {
