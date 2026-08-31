@@ -53,7 +53,7 @@ class ApprovalAction:
 class ApprovalDecision:
     """用户三选项决策。"""
 
-    choice: Literal["approve", "approve_type", "reject"]
+    choice: Literal["approve", "approve_type", "reject", "reject_rollback"]
     reason: str | None = None
 
 
@@ -152,6 +152,16 @@ class ApprovalPipeline:
                 allowed=True,
                 decision=decision,
                 message=f"用户已同意，并放行同类型操作（{action.operation_type}）。",
+            )
+        # v1.1-M4（FR-43）：拒绝并回退——文件回退由回调侧执行（UI 层职责，
+        # spec 决策 4），gate 仅映射拒绝语义：审计 + 回喂
+        if decision.choice == "reject_rollback":
+            reason_rb = decision.reason or "未提供理由"
+            self._audit.record(self._event(action, "reject_rollback", allowed=False, reason=reason_rb))
+            return ApprovalVerdict(
+                allowed=False,
+                decision=decision,
+                message=f"用户拒绝并已回退：{reason_rb}",
             )
         # reject
         reason = decision.reason or "未提供理由"

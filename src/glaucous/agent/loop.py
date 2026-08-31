@@ -28,15 +28,18 @@ state.mode 与快照，不一致即 emit——服务 submit_plan 批准回 Build
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, TYPE_CHECKING
 
 from ..context import budget, compactor
 from ..context.compactor import L1_KEEP_RECENT_ROUNDS, MAX_L2_FAILURES
-from ..context.history import History, ToolMessage
+from ..context.history import History, ToolMessage, history_digest
 from ..llm.client import LLMClient
 from ..safety.output_limit import truncate_output
 from ..tools.base import ParseCircuitBroken, ToolRegistry, ToolResult
 from .state import SessionState
+
+if TYPE_CHECKING:
+    from ..checkpoint.store import Checkpoint, CheckpointStore
 
 # loop → CLI 的事件契约（Day2 Plan §4.5）：Day 1 纯文本渲染，M3 升级 rich 主题
 # 事件类型：text（流式正文）/ tool_start / tool_end / diagnostic（终止诊断，必达）
@@ -58,6 +61,10 @@ class AgentLoop:
         context_limit: int = 128_000,
         outputs_dir: Path | None = None,
         plans_dir: Path | None = None,
+        # v1.1-M4（FR-40，spec 决策 2）：checkpoint 兜底设施——主 loop 注入，
+        # 子 agent loop 不注入（不产生子 checkpoint）；on_checkpoint 外泄本轮 seq
+        checkpoint_store: "CheckpointStore | None" = None,
+        on_checkpoint: "Callable[[Checkpoint], None] | None" = None,
     ):
         self._llm = llm
         self._registry = registry
@@ -70,10 +77,33 @@ class AgentLoop:
         self._outputs_dir = outputs_dir
         self._plans_dir = plans_dir
         self._l2_failures = 0  # L2 连续失败计数（达上限且仍 critical → 终止③，防压缩循环）
+        self._checkpoint_store = checkpoint_store
+        self._on_checkpoint = on_checkpoint
 
     async def run(self, task: str) -> str:
         """执行一轮用户任务，返回最终文本（自然终答 / 终止诊断）。"""
         self._registry.reset_parse_counter()  # 熔断语义限定在单任务内（Day1 Plan §4.1）
+        if self._checkpoint_store is not None:
+            # v1.1-M4（FR-40，spec §四）：每轮入口快照（push_user 之前取锚与计数）；
+            # 空历史首轮锚为空串哨兵（B4：不允许 IndexError 被吞掉——每会话
+            # 第一个任务也必须有 checkpoint）；兜底设施失败不阻断任务轮
+            try:
+                anchor = history_digest(self._history.messages[-1]) if self._history.messages else ""
+                cp = self._checkpoint_store.create(
+                    task,
+                    message_count=len(self._history.messages),
+                    anchor_digest=anchor,
+                )
+            except Exception:  # noqa: BLE001 —— checkpoint 不可用性不应杀死会话
+                cp = None
+            if cp is None and self._on_event is not None:
+                # B3（S2 口径）：首次创建失败的一次性告警（FR-40 明确提示不可用原因，
+                # 不每轮打扰）；note 事件经 make_on_event 落账+呈现
+                warn = self._checkpoint_store.take_warning()
+                if warn:
+                    self._on_event("note", {"message": warn})
+            if cp is not None and self._on_checkpoint is not None:
+                self._on_checkpoint(cp)  # 主 loop 接线为写 ctx.turn_checkpoint_seq（spec B2）
         self._history.push_user(task)
         steps = 0
         while True:

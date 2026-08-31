@@ -27,6 +27,7 @@ from typing import Any, Callable
 from .agent.loop import AgentLoop
 from .agent.state import MODE_PLAN, POLICY_AUTO_APPROVE, POLICY_PER_ACTION, SessionState
 from .agent.subagent import SubagentRunner
+from .checkpoint.store import CheckpointStore
 from .commands import COMMAND_META, ReplContext, handle_command, begin_turn
 from .config import ConfigError, load_config
 from .context.budget import BudgetReport, build_report
@@ -55,6 +56,7 @@ from .tools.search import GrepTool
 from .tools.shell import BashTool
 from .tools.skill_tool import LoadSkillTool
 from .tools.spawn_agent import SpawnAgentTool
+from .tools.spec_tool import ReadSpecTool
 from .sessions.index import SessionIndex, derive_name
 from .sessions.paths import create_session_history, migrate_legacy_sessions, project_dir
 from .ui.prompts import build_system_prompt
@@ -115,7 +117,7 @@ SLASH_COMMANDS = [
 # 参数段补全注册表（v1.1 反馈 F1，取代 PATH_ARG_COMMANDS 超集）：
 # /view → 工作区路径补全；/model → 模型名前缀过滤（候选经 model_names 动态取）；
 # /build → 授权策略两合法参数；/skill → 技能名补全（候选经 skill_names 动态取）
-ARG_COMPLETIONS = {"/view": "path", "/model": "model", "/build": "policy", "/skill": "skill", "/sessions": "session"}
+ARG_COMPLETIONS = {"/view": "path", "/model": "model", "/build": "policy", "/skill": "skill", "/sessions": "session", "/spec": "specsub"}
 
 # 思考区动态区高度下限（行）；实际窗口随终端高度自适应（v1.1 修订：生成期间
 # 尽量不截断思考内容，轮末统一收缩——下限兜底矮终端，上限 60 防占满屏）
@@ -260,6 +262,75 @@ def _arrow_mode() -> bool:
     return sys.stdout.isatty() and os.environ.get("GLAUCOUS_INPUT", "").strip().lower() != "plain"
 
 
+def thinking_enter(ctx: ReplContext) -> None:
+    """pipeline 间隙区间段（如子评审）干净进入思考区（R5）：独立计数不跨段累积。"""
+    thinking = getattr(ctx, "thinking", None)
+    if thinking is not None:
+        thinking.start_turn()
+        thinking.start()
+
+
+def thinking_exit(ctx: ReplContext) -> None:
+    """pipeline 间隙区间段结束：收缩为一行摘要（R5；区间段无轮内用量，不附 token 段）。"""
+    thinking = getattr(ctx, "thinking", None)
+    if thinking is not None:
+        thinking.close({})
+
+
+async def run_managed_turn(ctx: ReplContext, message: str, label: str = "") -> str:
+    """Spec pipeline 任务轮壳（v1.1-M5 验收反馈 R1/R3）：复刻 repl 任务轮同款时序。
+
+    pipeline 直调 ctx.loop.run 会绕过 repl 轮壳：思考区计数跨轮累积不收缩、
+    正文逐字直打不走 🕊 md 卡片。本壳层提供与 repl 一致的：
+    begin_turn 轮级重置 → thinking start_turn/start → loop.run → 轮末收缩摘要行 +
+    终答缓冲一次性 md 卡片 + 用量行。异常向上抛（由 pipeline 任务级兜底接住）。
+    """
+    begin_turn(ctx)
+    thinking = ctx.thinking
+    if thinking is not None:
+        thinking.start_turn()
+        thinking.start()
+    ctx.stream_state["printed"] = False
+    ctx.turn_active = True
+    ctx.turn_checkpoint_seq = None
+    answer = ""
+    turn_ok = False
+    try:
+        answer = await ctx.loop.run(message)
+        turn_ok = True
+        return answer
+    finally:
+        ctx.turn_active = False
+        ctx.turn_checkpoint_seq = None
+        usage_acc = ctx.session_usage
+        usage_acc["prompt"] += ctx.turn_usage.get("prompt") or 0
+        usage_acc["completion"] += ctx.turn_usage.get("completion") or 0
+        if ctx.session_index is not None:
+            ctx.session_index.touch(
+                ctx.history.session_id,
+                ctx.workspace,
+                auto_name=derive_name(label or message),
+                message_count=len(ctx.history.messages),
+                token_used=usage_acc["prompt"] + usage_acc["completion"],
+            )
+        # close 后 was_active 已复位（R5）：先取判据再收缩（终答呈现路径）
+        was_active = thinking.was_active if thinking is not None else False
+        if thinking is not None:
+            thinking.close(ctx.turn_usage)
+        if turn_ok:
+            body = "".join(ctx.text_segment).strip()
+            if body:
+                if was_active:
+                    ctx.session_events.append(("text_segment", {"text": body}))
+                render_answer_card(body)  # 终答统一 md 卡片（同 repl 轮末，R3）
+        else:
+            flush_text_segment(ctx)  # 异常轮：正文段落账供 /expand，不呈现
+        ctx.text_segment.clear()
+        usage_text = _usage_line(ctx.turn_usage)
+        if usage_text:
+            console.print(f"  [glaucous.muted]{usage_text}[/]")
+
+
 def make_ask_callback(ctx: ReplContext):
     """ask_user 终端实现（任务 2.3）：提问卡 + 候选列表 + 序号/自由文本回答。
 
@@ -315,12 +386,30 @@ def make_decision_callback(ctx: ReplContext):
     """
 
     def _reject_reason() -> str | None:
-        # 附加项 B：EOF/Ctrl+C 视为理由「用户取消」继续拒绝（不再落入本轮失败兜底）
+        # 附加项 B：EOF/Ctrl+C 视为理由「用户取消」继续拒绝（不再落入本轮失败兑底）
         try:
             return sanitize_input(console.input("  [glaucous.sub]拒绝理由（可留空）: [/]")).strip() or None
         except (EOFError, KeyboardInterrupt):
             console.print()
             return "用户取消"
+    
+    def _reject_with_rollback(reason: str | None) -> ApprovalDecision:
+        """FR-43「拒绝并回退」（v1.1-M4，spec §3.5）：立即回退本轮入口 checkpoint
+    
+        （只回文件不动上下文）；回退失败（GitError/checkpoint 丢失）降级为普通
+        拒绝并提示（S5），不击穿本轮。
+        """
+        store = ctx.checkpoint_store
+        cp = store.get(ctx.turn_checkpoint_seq) if store is not None and ctx.turn_checkpoint_seq is not None else None
+        if cp is None:
+            console.print("[glaucous.error]  回退失败，已按普通拒绝处理：本轮入口 checkpoint 不可用。[/]")
+            return ApprovalDecision(choice="reject", reason=reason)
+        try:
+            store.rollback(cp)
+        except Exception as exc:  # noqa: BLE001 —— 回退失败降级（spec S5）
+            console.print(f"[glaucous.error]  回退失败，已按普通拒绝处理：{escape(str(exc))}[/]")
+            return ApprovalDecision(choice="reject", reason=reason)
+        return ApprovalDecision(choice="reject_rollback", reason=reason)
 
     def decide(action: ApprovalAction) -> ApprovalDecision:
         ctx.live_hooks["pause"]()
@@ -353,25 +442,34 @@ def make_decision_callback(ctx: ReplContext):
                 if len(detail_lines) > 60:
                     console.print(f"[glaucous.muted]    …（详情共 {len(detail_lines)} 行，已截断展示）[/]")
             dangerous = action.risk == Risk.DANGEROUS
+            # v1.1-M4（FR-43）：「拒绝并回退」第四选项——仅主 agent 且本轮入口
+            # checkpoint 已就位时提供（子 agent/非 Git/创建失败退化为三选项现状）
+            rollback_ready = (
+                ctx.active_agent == "主 agent" and ctx.turn_checkpoint_seq is not None
+            )
             decision: ApprovalDecision | None = None
             if _arrow_mode():
-                # 三选项对齐 ApprovalDecision.choice（概设 §5.3、FR-11）
-                idx = select_with_arrows("请选择：", ["同意", "同意同类型", "拒绝"])
+                # 选项集对齐 ApprovalDecision.choice（概设 §5.3、FR-11）；
+                # DANGEROUS 呈现不分列（r2-S3），批量豁免安全性由 gate 守卫兜底
+                options = ["同意", "同意同类型", "拒绝"] + (["拒绝并回退"] if rollback_ready else [])
+                idx = select_with_arrows("请选择：", options)
                 if idx is None:
                     decision = ApprovalDecision(choice="reject", reason="用户取消")
                 elif idx == 0:
                     decision = ApprovalDecision(choice="approve")
                 elif idx == 1:
                     decision = ApprovalDecision(choice="approve_type")
-                else:
+                elif idx == 2:
                     decision = ApprovalDecision(choice="reject", reason=_reject_reason())
+                else:
+                    decision = _reject_with_rollback(_reject_reason())
             else:
                 while decision is None:
                     try:
                         if dangerous:
-                            raw = sanitize_input(console.input("  [glaucous.sub]\\[a] 同意  \\[c] 拒绝(附理由): [/]")).strip()
+                            raw = sanitize_input(console.input("  [glaucous.sub]\\[a] 同意  \\[/]" + ("\\[d] 拒绝并回退(附理由)  " if rollback_ready else "") + "\\[c] 拒绝(附理由): [/]")).strip()
                         else:
-                            raw = sanitize_input(console.input("  [glaucous.sub]\\[a] 同意  \\[b] 同意同类型  \\[c] 拒绝(附理由): [/]")).strip()
+                            raw = sanitize_input(console.input("  [glaucous.sub]\\[a] 同意  \\[b] 同意同类型  \\[/]" + ("\\[d] 拒绝并回退(附理由)  " if rollback_ready else "") + "\\[c] 拒绝(附理由): [/]")).strip()
                     except (EOFError, KeyboardInterrupt):
                         console.print()
                         decision = ApprovalDecision(choice="reject", reason="用户中断审批")
@@ -380,6 +478,8 @@ def make_decision_callback(ctx: ReplContext):
                         decision = ApprovalDecision(choice="approve")
                     elif not dangerous and raw in ("b", "B"):
                         decision = ApprovalDecision(choice="approve_type")
+                    elif rollback_ready and raw in ("d", "D"):
+                        decision = _reject_with_rollback(_reject_reason())
                     elif raw in ("c", "C", "n", "N"):
                         decision = ApprovalDecision(choice="reject", reason=_reject_reason())
                     else:
@@ -569,6 +669,9 @@ def render_event(event: str, payload: dict[str, Any], state: SessionState) -> No
     elif event == "diagnostic":
         # 终止诊断（步数上限/解析熔断）：loop 显式通知，保证多步轮中必达
         console.print(f"[glaucous.warn]\n  ⎿ {escape(payload['text'])}[/]")
+    elif event == "note":
+        # v1.1-M4：checkpoint 一次性告警（含 /expand 回放路径）
+        console.print(f"[glaucous.muted]  ⚠ {escape(str(payload.get('message', '')))}[/]")
     elif event == "mode_changed":
         # 模式切换/回归：提示符由 REPL 每轮按 state 重算，这里给一行可读反馈
         policy_note = (
@@ -669,6 +772,9 @@ def _thinking_line(event: str, payload: dict[str, Any]) -> str:
     """
     if event == "diagnostic":
         return f"⎿ {payload.get('text', '')}"
+    if event == "note":
+        # v1.1-M4（S7）：checkpoint 一次性告警在折叠思考区实时可见
+        return f"⚠ {payload.get('message', '')}"
     if event == "mode_changed":
         policy = "·每次审批" if payload.get("policy") == POLICY_PER_ACTION else "·自动放行"
         return f"◆ {payload.get('reason', '')}（{payload.get('mode', '')}{policy}）"
@@ -826,10 +932,17 @@ class ThinkingView:
 
     def resume(self) -> None:
         self._paused = False
-        self._redraw()
+        # 未激活区间不重绘（验收反馈 R5）：close 后的间隙段（如 pipeline 的
+        # ask 卡 pause/resume）若重绘会泄漏上一段的旧计数与正文尾残留
+        if self.was_active:
+            self._redraw()
 
     def close(self, usage: dict[str, Any]) -> None:
-        """轮末收缩：擦除动态区，原地留一行摘要（💭 …）；未激活轮（降级/管道）不打印。"""
+        """轮末收缩：擦除动态区，原地留一行摘要（💭 …）；未激活轮（降级/管道）不打印。
+
+        收缩后复位全部内部状态（验收反馈 R5）：间隙段的 pause/resume/事件
+        不再重绘旧块（此前 was_active 残留 + _text_buf 不清 → 旧计数与正文尾泄漏）。
+        """
         if not self.was_active:
             return
         self._erase()
@@ -837,6 +950,10 @@ class ThinkingView:
         console.print(
             f"[glaucous.dim]💭 思考过程（{self.count} 步{_usage_token_brief(usage)}）— /expand 查看[/]"
         )
+        self.count = 0
+        self._lines.clear()
+        self._text_buf = ""
+        self.was_active = False
 
 
 # /view 按后缀分发的渲染器注册表（M3 3.3 扩展：代码/文本/CSV）
@@ -1016,6 +1133,10 @@ def build_registry(
         ctx=ctx,
     )
     registry.register(SpawnAgentTool(runner))
+    # v1.1-M5（决策 7）：runner 挂账 ctx——SpecPipeline 评审/验收复用同一 runner；
+    # read_spec 常备注册（FR-56，子 registry 派生自然继承，r1-S9）
+    ctx.subagent_runner = runner
+    registry.register(ReadSpecTool(ctx.workspace))
 
     def confirm(plan: str) -> PlanDecision:
         """二选一交互（v1.1-M1，FR-38）：批准执行 / 修改意见。
@@ -1109,6 +1230,14 @@ def make_on_event(ctx: ReplContext, ws: Workspace, thinking: ThinkingView | None
             if thinking is not None:
                 thinking.note_step()
             return
+        if event == "note":
+            # v1.1-M4（B3/S2）：checkpoint 创建失败的一次性告警（store.take_warning）
+            ctx.session_events.append((event, payload))
+            if thinking is not None and thinking.active:
+                thinking.add(event, payload)
+            else:
+                console.print(f"[glaucous.muted]  ⚠ {escape(str(payload.get('message', '')))}[/]")
+            return
         if event == "sub_event" and payload.get("event") == "text":
             # v1.1-M2（spec §5.2，r1-B3）：子正文增量不流式直出，仅折叠摘要——
             # 折叠区经 thinking.add 单行滚动；降级/管道直打一行 dim。
@@ -1153,7 +1282,13 @@ def rebuild_loop(ctx: ReplContext, thinking: ThinkingView | None = None) -> None
     """
     if thinking is None:
         thinking = getattr(ctx, "thinking", None)
-    ws = Workspace(ctx.workspace, read_only_extra=ctx.config.read_only_extra)
+    # git 兜底区探测（用户决策 2026-08-31）：工作区是 Git 仓库（checkpoint 可用）
+    # 时区内写尽可能放行——区内文件写免审、区内危险命令降级 WRITE；
+    # 非 Git 无兜底 → 维持严格定级。available 惰性探测一次即缓存，重建开销可忽。
+    git_backed = bool(
+        getattr(ctx, "checkpoint_store", None) and ctx.checkpoint_store.available
+    )
+    ws = Workspace(ctx.workspace, read_only_extra=ctx.config.read_only_extra, git_backed=git_backed)
     on_event = make_on_event(ctx, ws, thinking)
     decision_callback = make_decision_callback(ctx)
     ctx.pipeline = ApprovalPipeline(ctx.state, callback=decision_callback, audit=ctx.audit)
@@ -1165,6 +1300,10 @@ def rebuild_loop(ctx: ReplContext, thinking: ThinkingView | None = None) -> None
         max_steps=ctx.config.max_steps, on_event=on_event,
         context_limit=ctx.config.context_limit,
         outputs_dir=ctx.outputs_dir, plans_dir=ctx.plans_dir,
+        # v1.1-M4（FR-40/43，spec B2）：checkpoint 仅注入主 loop（子 agent loop
+        # 不产生子 checkpoint）；本轮入口 seq 经回调外泄到 ctx，供审批卡消费
+        checkpoint_store=getattr(ctx, "checkpoint_store", None),
+        on_checkpoint=lambda cp: setattr(ctx, "turn_checkpoint_seq", cp.seq),
     )
 
 
@@ -1348,6 +1487,11 @@ def make_repl_completer(workspace: Path, model_names: Callable[[], list[str]] | 
                     for name in (session_names() if session_names else []):
                         if not arg or name.lower().startswith(arg.lower()):
                             yield Completion(name, start_position=-len(arg), display_meta="会话")
+                elif kind == "specsub":
+                    # /spec 子命令补全（v1.1-M5）；需求文本自由输入时无候选（前缀不命中）
+                    for name in ("status", "cancel"):
+                        if not arg or name.startswith(arg):
+                            yield Completion(name, start_position=-len(arg), display_meta="Spec 管理")
 
         return _ReplCompleter()
     except Exception:  # noqa: BLE001 —— 补全器故障不拒启动：降级无补全输入
@@ -1535,6 +1679,11 @@ async def repl(workspace: Path, resume_id: str | None) -> None:
     # 关闭/管道时 thinking 为 None：事件维持现状逐条实时打印，会话缓冲仍记录（/expand 可用）
     thinking: ThinkingView | None = ThinkingView() if _collapse_enabled() else None
 
+    # v1.1-M4（FR-40/41）：checkpoint 存储装配——惰性探测（非 Git 工作区降级为
+    # 不可用提示，不阻断启动）；保留数量可配（GLAUCOUS_CHECKPOINT_MAX_KEEP）
+    audit = AuditLog(workspace / ".glaucous" / "audit.log")
+    checkpoint_store = CheckpointStore(workspace, audit=audit, max_keep=config.checkpoint_max_keep)
+
     ctx = ReplContext(
         workspace=workspace,
         config=config,
@@ -1547,13 +1696,14 @@ async def repl(workspace: Path, resume_id: str | None) -> None:
         history=history,
         system_prompt=system_prompt,
         loop=None,
-        audit=AuditLog(workspace / ".glaucous" / "audit.log"),
+        audit=audit,
         renderer=theme,  # type: ignore[arg-type] —— 鸭子类型适配 M3-UI 主题渲染
         pipeline=None,
         outputs_dir=workspace / ".glaucous" / "outputs",
         plans_dir=workspace / ".glaucous" / "plans",
         session_index=session_index,
         session_usage=session_usage,
+        checkpoint_store=checkpoint_store,
     )
     # Live 钩子注入：四阻塞点（ask/decision/plan_decision/retry）经 live_hooks 暂停/恢复动态区；
     # 折叠关闭/管道时保持字段默认的 no-op；retry 经 theme._live_hooks 同源接线（§3.2）
@@ -1580,7 +1730,7 @@ async def repl(workspace: Path, resume_id: str | None) -> None:
     while True:
         # 输入区头部（rich，两路径共用）：模型 + ctx 占用行；模式段并入输入行前缀；
         # 模型名读 ctx.current_model（/model 切换后动态跟随）
-        report = build_report(ctx.history.view(), config.context_limit)
+        report = build_report(ctx.history.view(), ctx.config.context_limit)
         render_prompt_header(ctx.current_model, report)
         try:
             if session is not None:
@@ -1624,6 +1774,9 @@ async def repl(workspace: Path, resume_id: str | None) -> None:
         turn_ok = False
         # v1.1-M3（FR-50，r1-B1）：切换保护置位（复位在本轮 finally）
         ctx.turn_active = True
+        # v1.1-M4（FR-43）：本轮入口 checkpoint 由 loop.run 入口 on_checkpoint 写入；
+        # 轮开始先清哨兵（上轮残留不可消费）
+        ctx.turn_checkpoint_seq = None
         try:
             answer = await ctx.loop.run(task)
             turn_ok = True
@@ -1638,6 +1791,7 @@ async def repl(workspace: Path, resume_id: str | None) -> None:
         finally:
             # v1.1-M3：切换保护复位（r1-B1）+ 会话 token 累计与索引刷新（FR-45，尽力而为）
             ctx.turn_active = False
+            ctx.turn_checkpoint_seq = None  # v1.1-M4：本轮入口哨兵生命周期终结（spec §3.5）
             usage_acc = ctx.session_usage
             usage_acc["prompt"] += ctx.turn_usage.get("prompt") or 0
             usage_acc["completion"] += ctx.turn_usage.get("completion") or 0
@@ -1651,12 +1805,14 @@ async def repl(workspace: Path, resume_id: str | None) -> None:
                 )
             # 轮末时序（F4 §4.4）：折叠摘要行 → 最终回答自缓冲一次性输出 + 🕊 卡片 →
             # 用量行；异常路径：收缩与用量行照常，正文段落账后清空（B3），不呈现。
+            # close 后 was_active 已复位（R5）：先取判据再收缩
+            was_active = thinking.was_active if thinking is not None else False
             if thinking is not None:
                 thinking.close(ctx.turn_usage)
             if turn_ok:
                 body = "".join(ctx.text_segment).strip()
                 if body:
-                    if thinking is not None and thinking.was_active:
+                    if was_active:
                         # v1.1 修订（用户反馈）：渲染前原文归思考过程（/expand 可回看），
                         # 最终输出仅呈现 🕊 md 卡片；落账在摘要行渲染后，不计入已显示 N（S9 口径）
                         ctx.session_events.append(("text_segment", {"text": body}))

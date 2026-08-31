@@ -138,15 +138,28 @@ class CommandClassifier:
     # -- 内部细分 ----------------------------------------------------------
 
     def _classify_rm(self, command: str) -> tuple[Risk, str]:
-        """rm 删除：危险模式/区外/受保护 → DANGEROUS；区内删除 → WRITE。"""
+        """rm 删除：危险模式/区外/受保护 → DANGEROUS；区内删除 → WRITE。
+
+        v1.1-M5 修订（用户决策 2026-08-31，git 兜底区）：命中危险模式但删除目标
+        全在区内（非受保护）时，git_backed → 降级 WRITE（checkpoint 可回退，
+        如 `rm -rf .venv`/`rm -rf .` 重建型清理）；非 Git 或目标含区外/受保护仍 DANGEROUS。
+        """
         if any(p in command for p in DANGEROUS_RM_PATTERNS):
+            targets = self._tokens_after(command)
+            all_inside = targets and all(
+                self._path_risk(t, writing=True) == Risk.SAFE for t in targets
+            )
+            if all_inside and self._workspace.git_backed:
+                return Risk.WRITE, "rm 命中危险删除模式但目标全在区内（git 兜底区降级）"
             return Risk.DANGEROUS, "rm 命中危险删除模式（根目录/家目录/工作区根）"
         # 扫描删除目标路径：区外/受保护 → DANGEROUS；区内 → WRITE（删除是写操作）
         for token in self._tokens_after(command):
             risk = self._path_risk(token, writing=True)
-            if risk != Risk.SAFE:
-                return risk, f"rm 删除路径指向 {token}"
-        # 目标全在区内：删除是写操作，绝不低于 WRITE
+            if risk != Risk.DANGEROUS:
+                continue
+            return risk, f"rm 删除路径指向 {token}"
+        # 目标全在区内：删除是写操作，绝不低于 WRITE（git 兜底区亦保持 WRITE：
+        # 删除不可逆于用户认知，per-action 下保留一次确认且可同类型豁免）
         return Risk.WRITE, "rm 区内删除（写操作）"
 
     def _classify_safe_command(self, first: str, command: str) -> tuple[Risk, str]:
@@ -223,7 +236,12 @@ class CommandClassifier:
         return targets
 
     def _classify_git(self, command: str) -> tuple[Risk, str]:
-        """git 子命令细分：只读子命令 SAFE；push --force 等 DANGEROUS；其余写 WRITE。"""
+        """git 子命令细分：只读子命令 SAFE；push --force 等 DANGEROUS；其余写 WRITE。
+
+        v1.1-M5 修订（用户决策 2026-08-31，git 兜底区）：工作树侧危险模式
+        （reset --hard/clean -f/checkout -- .）在 git_backed 下降级 WRITE（checkpoint
+        可回退工作树）；push --force 影响远端无兜底，恒 DANGEROUS。
+        """
         tokens = command.split()
         if len(tokens) < 2:
             return Risk.WRITE, "git 缺少子命令"
@@ -233,6 +251,10 @@ class CommandClassifier:
         if sub in ("push", "reset", "clean", "checkout"):
             for pat in GIT_DANGEROUS_PATTERNS:
                 if pat in command:
+                    if pat.startswith("push"):
+                        return Risk.DANGEROUS, f"git {sub} 命中危险模式: {pat}"
+                    if self._workspace.git_backed:
+                        return Risk.WRITE, f"git {sub} 命中危险模式 {pat}（git 兜底区降级）"
                     return Risk.DANGEROUS, f"git {sub} 命中危险模式: {pat}"
         if sub in ("commit", "add", "mv", "rm", "push", "merge", "rebase", "tag"):
             return Risk.WRITE, f"git {sub} 写操作"

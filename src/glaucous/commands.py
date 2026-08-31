@@ -37,6 +37,8 @@ from .permission.modes import MODE_BUILD, MODE_PLAN, POLICY_AUTO_APPROVE, POLICY
 from .ui.renderer import Renderer
 
 if TYPE_CHECKING:
+    from .agent.subagent import SubagentRunner
+    from .checkpoint.store import Checkpoint, CheckpointStore
     from .cli import ThinkingView
     from .sessions.index import SessionEntry, SessionIndex
 
@@ -44,6 +46,14 @@ if TYPE_CHECKING:
 MEMORY_SCOPES = ("project", "global")
 _SCOPE_PREFIX = {"project": "p", "global": "g"}
 _SCOPE_LABEL = {"project": "项目", "global": "全局"}
+
+# 上下文窗口档位（/context 切换，用户验收反馈 2026-08-31：三档，最大 1M）
+# 档位为运行时可切换（区别于启动环境变量 GLAUCOUS_CONTEXT_LIMIT 的初始值）
+CONTEXT_TIERS: tuple[tuple[int, str], ...] = (
+    (128_000, "128K"),
+    (512_000, "512K"),
+    (1_000_000, "1M"),
+)
 
 # 命令全集单一数据源（v1.1 打磨 R2-S10）：命令名 → 一句摘要。
 # HELP_LINES 由它拼装；cli 补全器的 meta 也从本表导入（cli → commands 既有导入方向，
@@ -59,6 +69,10 @@ COMMAND_META: dict[str, str] = {
     "/rename": "重命名当前会话",
     "/fork": "分叉当前会话（另存为语义）",
     "/stats": "会话与全局统计",
+    "/context": "调整上下文窗口大小（128K/512K/1M 三档）",
+    "/spec": "发起 Spec 流程（澄清→评审→执行→验收；/spec status|cancel 管理）",
+    "/specs": "列出全部 Spec 及状态",
+    "/rollback": "回退文件到历史 checkpoint（可同时回退对话上下文）",
     "/model": "列出模型档案 / 切换档案（切换时连通性校验）",
     "/memory": "查看记忆（/memory add|del 管理）",
     "/rules": "查看全局/项目规则文件",
@@ -78,6 +92,9 @@ _COMMAND_USAGE: dict[str, str] = {
     "/sessions": "/sessions [kw|id|a]",
     "/rename": "/rename <name>",
     "/fork": "/fork [name]",
+    "/rollback": "/rollback",
+    "/context": "/context [1|2|3 或 128K|512K|1M]",
+    "/spec": "/spec [需求|status|cancel]",
     "/model": "/model [name]",
     "/build": "/build [auto-approve|per-action]",
     "/exit": "/exit  /quit",
@@ -165,6 +182,18 @@ class ReplContext:
     active_state: SessionState | None = None
     active_agent: str = "主 agent"
     active_task: str = ""
+    # —— v1.1-M4：checkpoint（FR-40~43，spec §一）——
+    # checkpoint_store：快照存储（repl 装配；None=未装配降级）。经 ctx 间接引用
+    # （D8），/clear、/resume 重建 loop 后仍有效
+    checkpoint_store: "CheckpointStore | None" = None
+    # turn_checkpoint_seq：本轮入口 checkpoint seq。生命周期（spec B2）：轮开始
+    # 置 None → loop.run 入口 on_checkpoint 写入 → 审批卡「拒绝并回退」消费 →
+    # 轮末 finally 清理
+    turn_checkpoint_seq: int | None = None
+    # —— v1.1-M5：Spec 子系统（FR-52~59）——
+    # subagent_runner：rebuild_loop 装配后挂账（决策 7，D8：经 ctx 间接引用，
+    # /clear、/resume 重建后仍有效）；SpecPipeline 评审/验收复用同一 runner
+    subagent_runner: "SubagentRunner | None" = None
 
 
 def begin_turn(ctx: ReplContext) -> None:
@@ -856,6 +885,262 @@ async def _cmd_stats(ctx: ReplContext) -> bool:
     return True
 
 
+async def _cmd_rollback(ctx: ReplContext) -> bool:
+    """一键回退（v1.1-M4，FR-42；spec §3.4）。
+
+    流程：非 Git/空列表降级 → 列表箭头选择 → 变更清单确认卡 → store.rollback
+    （只回文件）→ 上下文二问（默认否）：是 → History.truncate_to（锚校验）+
+    rebuild_loop。阻塞交互遵守 live_hooks pause/resume 协议（v1.1 R3）。
+    """
+    from rich.markup import escape
+
+    from .checkpoint.git_snapshots import GitError
+    from .cli import rebuild_loop, select_with_arrows
+    from .context.history import ContextAnchorMismatch
+    from .theme import console, make_card
+
+    store = ctx.checkpoint_store
+    if store is None or not store.available:
+        ctx.renderer.note(
+            store.unavailable_reason() if store is not None else "checkpoint 不可用（未装配）。"
+        )
+        return True
+    if ctx.turn_active:
+        # 任务轮进行中拒绝回退（与 FR-50 切换保护同语义；「拒绝并回退」走审批卡路径）
+        ctx.renderer.error("本轮任务执行中，无法回退。")
+        return True
+    cps = store.list()
+    if not cps:
+        ctx.renderer.note("暂无可用 checkpoint。")
+        return True
+
+    ctx.live_hooks["pause"]()
+    try:
+        # 步骤 3：列表选择（新→旧）
+        options = [f"#{cp.seq} · {cp.created_at} · {cp.task[:40]}" for cp in cps]
+        idx = select_with_arrows("选择要回退到的 checkpoint：", options)
+        if idx is None:
+            ctx.renderer.note("已取消回退。")
+            return True
+        cp = cps[idx]
+        # 步骤 4：变更清单确认卡
+        try:
+            changes = store.preview_changes(cp)
+        except GitError as exc:
+            ctx.renderer.error(f"无法计算变更清单：{exc}")
+            return True
+        restore_n = sum(1 for c in changes if c["status"] in ("M", "D"))
+        remove_n = sum(1 for c in changes if c["status"] == "A")
+        console.print()
+        table = make_card(f":hourglass_flowing_sand: 回退到 checkpoint #{cp.seq}")
+        table.add_row("任务", f"[glaucous.title]{escape(cp.task[:60])}[/]")
+        table.add_row("将还原", f"{restore_n} 个已修改/删除的文件")
+        table.add_row("将移除", f"{remove_n} 个 checkpoint 之后新增的文件")
+        console.print(table)
+        for item in changes[:10]:
+            mark = "还原" if item["status"] in ("M", "D") else "移除"
+            console.print(f"  [glaucous.sub]{mark} {escape(item['path'])}[/]")
+        if len(changes) > 10:
+            console.print(f"[glaucous.muted]  …共 {len(changes)} 项，已截断展示[/]")
+        confirm = select_with_arrows("确认回退？", ["确认回退", "取消"])
+        if confirm != 0:
+            ctx.renderer.note("已取消回退。")
+            return True
+        # 步骤 5：文件回退（只回文件，不动上下文）
+        try:
+            changes = store.rollback(cp)
+        except GitError as exc:
+            # spec §五：工作树可能已部分还原，显式告知优于假装成功
+            ctx.renderer.error(f"回退失败，请用 git status 检查工作区：{exc}")
+            return True
+        failed = [c["path"] for c in changes if c.get("failed")]
+        summary = f"已回退到 checkpoint #{cp.seq}（{len(changes)} 项变更）"
+        if failed:
+            # S5：列出未能移除的路径（≤5 条 + 溢出计数）
+            shown = "、".join(failed[:5]) + (f" 等 {len(failed)} 项" if len(failed) > 5 else "")
+            summary += f"；未能移除：{shown}"
+        ctx.renderer.info(summary)
+        # 上下文二问（默认否）
+        ctx_choice = select_with_arrows(
+            "是否同时回退对话上下文？", ["否（保留对话，默认）", "是（截断到该轮入口）"]
+        )
+        if ctx_choice == 1:
+            try:
+                ctx.history.truncate_to(cp.message_count, cp.anchor_digest)
+            except ContextAnchorMismatch as exc:
+                ctx.renderer.note(f"对话上下文已变更，本次仅回退文件：{exc}")
+                return True
+            except OSError as exc:
+                ctx.renderer.error(f"文件已回退但对话截断失败：{exc}")
+                return True
+            ctx.last_budget = None  # 占用条随截断后的历史重算（spec §3.4）
+            rebuild_loop(ctx)       # 与 /clear 同一重建路径（D8）
+            ctx.renderer.note("对话上下文已回退到该轮入口。")
+            ctx_note = "（对话上下文已同时截断到该轮入口）"
+        else:
+            ctx.renderer.note("对话上下文已保留，模型仍记得后续操作。")
+            ctx_note = "（对话上下文保留）"
+        # 用户验收反馈（2026-08-31）：回退动作写入上下文——此前回退不写历史，
+        # 模型「不知道已回退」。以系统标记的 user 消息记录，模型据此感知文件状态变化；
+        # 该消息会成为下一轮入口锚（正常）。选“是”截断后，上下文 = 截断历史 + 本记录。
+        restore_paths = [c["path"] for c in changes if c["status"] in ("M", "D")]
+        remove_paths = [c["path"] for c in changes if c["status"] == "A"]
+        ctx.history.push_user(
+            f"[系统] 用户执行了 /rollback，已回退到 checkpoint #{cp.seq}（该轮任务：{cp.task[:40]}）："
+            f"还原 {len(restore_paths)} 个文件（{', '.join(restore_paths[:5])}"
+            + (" 等" if len(restore_paths) > 5 else "") + f"），"
+            f"移除 {len(remove_paths)} 个文件（{', '.join(remove_paths[:5])}"
+            + (" 等" if len(remove_paths) > 5 else "") + f"）。{ctx_note}"
+        )
+        return True
+    finally:
+        ctx.live_hooks["resume"]()
+
+
+async def _cmd_context(ctx: ReplContext, arg: str) -> bool:
+    """调整上下文窗口大小（用户验收反馈 2026-08-31：三档 128K/512K/1M，最大 1M）。
+
+    无参 → 箭头选择三档；`/context <n|名>` 直接切换。切换后以 dataclasses.replace
+    生成新 Config（frozen 不可原地改）赋给 ctx.config，并 rebuild_loop 使 loop 的
+    压缩/预算阈值生效（D8）；占用条与 /compact 读 ctx.config.context_limit 自动跟随。
+    """
+    from dataclasses import replace
+
+    from .cli import rebuild_loop, select_with_arrows
+
+    current = ctx.config.context_limit
+
+    def _label(limit: int, name: str) -> str:
+        mark = "● " if limit == current else "  "
+        return f"{mark}{name}（{limit:,} tokens）"
+
+    target: int | None = None
+    raw = arg.strip().lower()
+    if raw:
+        for i, (limit, name) in enumerate(CONTEXT_TIERS, 1):
+            if raw in (str(i), name.lower()):
+                target = limit
+                break
+        if target is None:
+            ctx.renderer.error("无效档位。可选：1(128K) / 2(512K) / 3(1M)。")
+            return True
+    else:
+        ctx.live_hooks["pause"]()
+        try:
+            idx = select_with_arrows(
+                "选择上下文窗口大小：", [_label(l, n) for l, n in CONTEXT_TIERS]
+            )
+        finally:
+            ctx.live_hooks["resume"]()
+        if idx is None:
+            ctx.renderer.note("已取消。")
+            return True
+        target = CONTEXT_TIERS[idx][0]
+
+    if target == current:
+        ctx.renderer.info(f"上下文已是 {target:,} tokens，无变化。")
+        return True
+    ctx.config = replace(ctx.config, context_limit=target)
+    ctx.last_budget = None  # 占用条随新上限重算（下一轮头部刷新）
+    rebuild_loop(ctx)       # 重建 loop 使压缩/预算阈值生效（D8：闭包经 ctx 间接引用）
+    ctx.renderer.info(f"上下文窗口已调整为 {target:,} tokens。")
+    return True
+
+
+# ---------------------------------------------------------------------------
+# Spec 子系统命令（v1.1-M5，FR-59；spec §3.5）
+# ---------------------------------------------------------------------------
+
+
+_STATUS_LABEL = {
+    "draft": "起草中", "reviewing": "评审中", "approved": "已批准",
+    "executing": "执行中", "code_review": "代码评审中",
+    "verified": "已验收", "archived": "已归档",
+}
+
+
+def _spec_status_lines(doc) -> list[str]:
+    """Spec 状态卡内容行（/spec status 与 /spec 无参共用）。"""
+    tasks = doc.tasks()
+    done = sum(1 for _no, finished, _t in tasks if finished)
+    lines = [
+        f"Spec：{doc.spec_id}（{doc.name}）",
+        f"状态：{_STATUS_LABEL.get(doc.status, doc.status)} · 轮次：{doc.meta.get('round', 0)}"
+        + (f" · 模式：{doc.meta['mode']}" if doc.meta.get("mode") else "")
+        + (f" · 验收：{doc.meta['acceptance']}" if doc.meta.get("acceptance") else ""),
+        f"任务：{done}/{len(tasks)} 已完成 · 验收标准 {len(doc.acceptance())} 条",
+        f"文档：.glaucous/specs/{doc.path.name}（read_spec 可回读全文）",
+    ]
+    lines += [f"  [{'x' if finished else ' '}] {text}" for _no, finished, text in tasks]
+    return lines
+
+
+async def _cmd_spec(ctx: ReplContext, arg: str) -> bool:
+    """/spec [需求|status|cancel]（FR-59）：发起全流程 / 管理面。"""
+    from .spec.pipeline import SpecPipeline
+    from .spec.store import SpecStore
+
+    store = SpecStore(ctx.workspace)
+    sub = arg.strip()
+    if sub == "status":
+        doc = store.active() or (store.list_all() or [None])[0]
+        if doc is None:
+            ctx.renderer.note("尚无 Spec 文档（/spec <需求> 可发起）。")
+            return True
+        ctx.renderer.info("◆ Spec 状态")
+        for line in _spec_status_lines(doc):
+            ctx.renderer.note(f"  {line}")
+        return True
+    pipeline = SpecPipeline(ctx)
+    if sub == "cancel":
+        doc = store.active()
+        if doc is None:
+            ctx.renderer.note("无活跃 Spec，无需取消。")
+            return True
+        await pipeline.cancel(doc)
+        return True
+    if not sub:
+        # 无参：存在 executing → 进度卡 + 继续/取消；其他非终态 → 状态提示（决策 12）
+        doc = store.active()
+        if doc is None:
+            ctx.renderer.note("用法：/spec <需求> 发起 Spec 流程；/specs 查看全部。")
+            return True
+        ctx.renderer.info("◆ 当前 Spec 进度")
+        for line in _spec_status_lines(doc):
+            ctx.renderer.note(f"  {line}")
+        if doc.status == "executing":
+            await pipeline.ask_continue(doc)  # 公开方法（S3：不跨层访问 _hooks）
+        else:
+            ctx.renderer.note(
+                f"状态 {doc.status} 不支持自动续跑（轮内上下文已失）；"
+                "可 /spec cancel 归档后重新发起，已执行改动有 checkpoint 兜底。"
+            )
+        return True
+    await pipeline.start(sub)
+    return True
+
+
+async def _cmd_specs(ctx: ReplContext) -> bool:
+    """/specs：全量列表卡（id/name/status/round/updated_at，倒序）。"""
+    from .spec.store import SpecStore
+
+    store = SpecStore(ctx.workspace)
+    docs = store.list_all()
+    for warning in getattr(store, "warnings", []):
+        ctx.renderer.note(f"⚠ {warning}")
+    if not docs:
+        ctx.renderer.note("尚无 Spec 文档（/spec <需求> 可发起）。")
+        return True
+    ctx.renderer.info(f"◆ Spec 列表（{len(docs)} 个）")
+    for doc in docs:
+        ctx.renderer.note(
+            f"  {doc.spec_id} · {doc.name} · "
+            f"{_STATUS_LABEL.get(doc.status, doc.status)} · 轮次 {doc.meta.get('round', 0)} · "
+            f"{doc.meta.get('updated_at', '')}"
+        )
+    return True
+
+
 # ---------------------------------------------------------------------------
 # 分派入口
 # ---------------------------------------------------------------------------
@@ -889,6 +1174,14 @@ async def handle_command(line: str, ctx: ReplContext) -> bool | str:
         return await _cmd_fork(ctx, rest)
     if cmd == "/stats":
         return await _cmd_stats(ctx)
+    if cmd == "/rollback":
+        return await _cmd_rollback(ctx)
+    if cmd == "/context":
+        return await _cmd_context(ctx, rest)
+    if cmd == "/spec":
+        return await _cmd_spec(ctx, rest)
+    if cmd == "/specs":
+        return await _cmd_specs(ctx)
     if cmd == "/model":
         return await _cmd_model(ctx, rest)
     if cmd == "/memory":

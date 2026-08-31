@@ -166,6 +166,37 @@
 - [x] 3.6 单测 20 个（index/commands 两文件）；全量 236 passed（基线 212 守恒，WSL 环境）；spec 评审 4 轮 + 代码评审 3 轮通过（docs/reviews/202608302000-* 与 202608302100-*）
 - [x] 3.7 验收实测反馈修复三件（详见 spec §十二）：R1 /sessions 消解链增名称级（精确同名唯一 → 切换，子串仍仅展示）；R2 名称全局唯一化（同名 upsert/touch/rebuild 自动追加 id 尾段后缀，/rename 提示最终名，用户无需输入 id）；R3 切换后思考区失效回归修复（ReplContext.thinking + rebuild_loop 回退，/clear、/resume、/fork、/sessions 切换后折叠区/卡片渲染不再丢失）；全量 239 passed
 
+### V1.1-M4 Checkpoint（8/31）
+
+- [x] 4.1 checkpoint/git_snapshots.py：临时索引快照（read-tree/add/rm --cached/write-tree/commit-tree/update-ref，对概设 stash create 方案的显式修正——含 untracked）/diff M,D,A 三源/restore/ref 管理/core.quotepath=off（FR-40）
+- [x] 4.2 checkpoint/store.py：checkpoints.json 索引（原子写/损坏起步/seq 归一化）+ 保留淘汰（50 可配 GLAUCOUS_CHECKPOINT_MAX_KEEP）+ AgentLoop.run() 入口接线（空历史锚哨兵/失败降级 note 告警/on_checkpoint 外泄）（FR-40/41）
+- [x] 4.3 /rollback：列表箭头选择 → 变更清单确认卡 → 文件还原 + 上下文回退选项（History.truncate_to 锚校验 + rebuild_loop）（FR-42）
+- [x] 4.4 审批拒绝联动：审批卡「拒绝并回退」第四选项（主 agent 且本轮入口 checkpoint 就位；回退失败降级普通拒绝）→ gate reject_rollback 分支（FR-43）
+- [x] 4.5 单测 28 个（checkpoint_git/rollback_context 两文件）；全量 267 passed（基线 239 守恒，WSL 环境）；spec 评审 4 轮 + 代码评审 4 轮通过（docs/reviews/202608310900-* 与 202608311100-*）
+- [x] 4.6 验收期增强两件（用户反馈 2026-08-31，全量 273 passed）：① /rollback 后写入「[系统] 回退记录」到对话上下文，模型可感知已回退；② /context 命令：上下文窗口三档切换（128K/512K/1M，最大 1M），dataclasses.replace 生成新 Config + rebuild_loop 生效，占用条/压缩阈值/子任务自动跟随
+
+### V1.1-M4 Checkpoint 代码评审建议项（r4，见 docs/reviews/202608311100-code-review-v11-m4-checkpoint-r4.md；B1~B7 已修复并经 r2/r3/r4 聚焦复审放行）
+
+- [ ] S15 已在 spec 决策 5 登记为已知边界（glob 排除不命中裸文件），无代码待办
+- [ ] r1-S2 残余：M5 复用 store.create 时若需区分失败原因，建议返回错误对象而非 None（当前异常路径经审计 error 字段已可追溯）
+- [x] 决策 6（用户决策 2026-08-31，二次重评：选放宽 → 见 5.11）：checkpoint 落地后区内写放宽窗口开启，用户明确「只要 git 能兜底都尽可能放开」——实现为 git 兜底区矩阵（区内写免审 + 区内危险命令降 WRITE），.glaucous/ 写与区外写维持严格
+- [ ] 决策 7：auto_rollback_on_reject 配置与 checkpoint 可关开关，M6 测试与评测期统一收口
+- [ ] r1-S13 残余：本批包含 11 个文件的一次性行尾归一化（CRLF→LF，内容等价），后续 Windows 侧编辑建议配合 .gitattributes 治理
+
+### V1.1-M5 Spec 子系统（8/31）
+
+- [x] 5.1 spec/store.py：Spec 文档读写/frontmatter/状态机（draft→reviewing→approved→executing→code_review→verified/archived，强校验迁移）+ spec/templates.py：七节模板 + 两套评审检查清单 + 报告/核验契约（FR-54）
+- [x] 5.2 澄清访谈编排：/spec 触发 → ask_user 访谈（主 loop 轮）→ 确定性门确认清楚 → 起草落盘（draft，缺节补写一轮兜底）（FR-53）
+- [x] 5.3 Spec 评审循环：spawn 评审子 agent（检查清单+用户反馈+报告契约）→ 评审报告卡（阻塞/建议分级）→ 修订回环 ≤3 轮 + 全自动/深度介入模式 + 耗尽升级（再修订仅一次）（FR-55）
+- [x] 5.4 批准卡 + 执行管线：任务清单勾选写回文档（状态即文档，概设 todo_write 收窄）、Spec 锚内联任务消息 + read_spec 工具回读、每任务前权威任务级 checkpoint（双保险：pipeline 显式创建 + loop 入口冗余）（FR-56）
+- [x] 5.5 代码评审循环：diff（自执行入口基线快照，经 store.get/preview_changes）+ 验收标准 → 评审子 agent → 修复复审 ≤3 轮 → 验收核验（保守口径：全 ✓ 且无 ✗ 且 ✓≥标准数）→ verified/archived（FR-57/58）
+- [x] 5.6 /spec（发起/status/cancel/无参续跑）/ /specs 命令 + 评审报告/批准/验收三类卡片渲染 + ReplContext.subagent_runner 挂账 + ARG_COMPLETIONS specsub + BASE_PROMPT 主动建议（FR-59/52）
+- [x] 5.7 mock LLM 单测 51 个（test_spec_store 15 + test_spec_pipeline 36：状态机/双评审回放/四类耗尽升级/任务执行联动/截断回读/非 Git 降级/None 语义/命令路由）；全量 324 passed（基线 273 守恒，WSL 环境）；spec 评审 2 轮 + 代码评审 2 轮通过（docs/reviews/202608311500-* 与 202608311700-*）
+- [x] 5.8 验收实测反馈修复四件（用户反馈 2026-08-31，全量 325 passed；详见 spec §九.7~9）：R1 受管任务轮壳（cli.run_managed_turn 复刻 repl 时序：思考区逐轮收缩不累积）；R2 全自动 + 评审正常通过（无阻塞）→ 跳过批准卡直接执行，深度介入/升级路径仍呈卡；R3 流程终局追加主 agent 总结轮（md 卡片呈现）；另修正验收解析（核验行带「- 」列表标记误判存在未决）
+- [x] 5.9 验收二轮反馈修复两件（用户反馈 2026-08-31，全量 327 passed；详见 spec §九.10~11）：R5 思考区间隙段治理（close 后复位状态 + resume 未激活不重绘 + 子评审区间段自有生命周期，消除旧计数跨段累积与正文尾泄漏）；起草/修订终答净化（_clean_body 剔除「起草说明」类交互性元话语与开场白，防污染 Spec 文档与评审输入）
+- [x] 5.10 测试污染真实 ~/.glaucous 事故修复（用户反馈「每次启动都提示索引重建 + tokens 恒 0」，2026-08-31）：根因是 test_sessions_index 损坏索引用例经 from-import 直接绑定 index_path，绕过 monkeypatch 把 "{broken json!!" 写进真实索引文件，每次跑测试都损坏 → 每次启动重建（token_used 归零）。修复：改经模块属性动态取路径；test_sessions_commands fake_home 改 autouse 并补 index_path 双侧补丁；清理历史污染（63 个测试项目目录、索引 66→3 项目）；已验证跑测试不再触碰真实索引
+- [x] 5.11 权限矩阵放宽：git 兜底区（用户决策 2026-08-31，全量 336 passed）：工作区为 Git 仓库（checkpoint_store.available 探测，rebuild_loop 注入 Workspace.git_backed）时——区内 write_file/edit_file 免审；区内危险命令降级 WRITE（rm 危险模式目标全区内、git reset --hard/clean -f/checkout -- .，可同类型豁免）；不放宽：.glaucous/ 写（快照排除+审计底线）、区外写、git push --force（远端无兜底）；非 Git 工作区自动维持严格矩阵。已知边界：gitignored 文件（.venv 等）不进快照，删除不可回退；会话中途新 git init 需下次重建生效
+
 ### V1.1-M3 会话管理代码评审建议项（r1，见 docs/reviews/202608302100-code-review-v11-m3-sessions-r1.md；B1/B2 已修复并经 r2/r3 聚焦复审放行；r3-S1 状态行已更新）
 
 - [ ] r3-S1 TODO.md 登记头部状态滞后自愈（本轮已更新，后续轮次保持同步）

@@ -90,6 +90,39 @@ class TestReadScope:
         assert risk == Risk.DANGEROUS  # 写完整性保护不变
 
 
+class TestGitBackedWriteApproval:
+    """git 兜底区写审批放宽（用户决策 2026-08-31）：区内写免审；
+    受保护/区外写不放宽；非 Git 区内写维持 WRITE（上方既有口径不变）。"""
+
+    @pytest.fixture()
+    def ws_git(self, tmp_path: Path) -> Workspace:
+        root = tmp_path / "ws_git"
+        root.mkdir()
+        return Workspace(root, git_backed=True)
+
+    def test_inside_write_exempt(self, ws_git: Workspace) -> None:
+        assert WriteFileTool(ws_git).build_approval({"path": "src/a.py", "content": "x"}, "build") is None
+        assert EditFileTool(ws_git).build_approval(
+            {"path": "src/a.py", "old": "a", "new": "b"}, "build"
+        ) is None
+
+    def test_protected_write_still_dangerous(self, ws_git: Workspace) -> None:
+        # .glaucous/ 不在快照内（无 git 保证）+ 审计底线：不放宽
+        action = WriteFileTool(ws_git).build_approval(
+            {"path": ".glaucous/audit.log", "content": "x"}, "build"
+        )
+        assert action is not None and action.risk == Risk.DANGEROUS
+
+    def test_outside_write_still_dangerous(self, ws_git: Workspace) -> None:
+        action = WriteFileTool(ws_git).build_approval({"path": "../outside.py", "content": "x"}, "build")
+        assert action is not None and action.risk == Risk.DANGEROUS
+
+    def test_non_git_inside_write_still_approval(self, ws: Workspace) -> None:
+        # 非 Git 无兜底：区内写维持 WRITE 走审批（既有口径守恒）
+        action = WriteFileTool(ws).build_approval({"path": "src/a.py", "content": "x"}, "build")
+        assert action is not None and action.risk == Risk.WRITE
+
+
 class TestWriteToolSkillRefresh:
     @pytest.mark.asyncio
     async def test_write_skill_refreshes_index(self, ws: Workspace) -> None:

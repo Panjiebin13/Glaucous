@@ -15,6 +15,7 @@ dispatch 之前先 push_assistant，push_tool 携带 call_id 配对入史。
 
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -31,6 +32,16 @@ SESSION_META_TYPE = "session_meta"
 # 内部存储与 JSONL 保留原文（D1 全量落盘，非模型上下文）
 ANCHOR_TOOL_NAME = "submit_plan"
 PLAN_ANCHOR_TEXT = "【方案锚】方案全文已存档至 .glaucous/plans/，可调用 read_plan 回读全文"
+
+
+class ContextAnchorMismatch(RuntimeError):
+    """上下文截断点校验失败（v1.1-M4 spec §3.3：截断点已被压缩/轮转改变）。"""
+
+
+def history_digest(entry: dict[str, Any]) -> str:
+    """消息内容摘要 sha256[:12]（v1.1-M4 checkpoint 锚，spec §二）。"""
+    payload = json.dumps(entry, ensure_ascii=False, sort_keys=True)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:12]
 
 
 @dataclass
@@ -168,6 +179,35 @@ class History:
             args = {}
         args["plan"] = PLAN_ANCHOR_TEXT
         return {**call, "function": {**fn, "arguments": json.dumps(args, ensure_ascii=False)}}
+
+    # -- 上下文回退（v1.1-M4，FR-42「同时回退上下文」；spec §3.3） -------------
+
+    def truncate_to(self, count: int, anchor_digest: str) -> None:
+        """截断对话上下文到前 count 条消息（先写文件后改内存，失败两态一致）。
+
+        锚配对校验（B3）：count 超界或 messages[count-1] 摘要与 checkpoint 记录
+        不符（L2 压缩在轮间原位替换历史）→ 抛 ContextAnchorMismatch，绝不静默
+        错位截断。anchor_digest == "" 为空历史首轮哨兵（B4），仅允许与创建时
+        message_count == 0 的 checkpoint 配对——此时截断到 0 条 = 清空对话
+        （JSONL 仅 meta 行），是真实截断操作而非 no-op（B6 消歧）。
+        写失败（OSError）→ 抛出：内存尚未改动，文件已回退、上下文未动的
+        部分回退由调用方显式告知（禁止静默）。
+        """
+        messages = self._messages
+        if count > len(messages):
+            raise ContextAnchorMismatch(f"截断点 {count} 超出当前历史长度 {len(messages)}")
+        if count > 0 and history_digest(messages[count - 1]) != anchor_digest:
+            raise ContextAnchorMismatch("截断点消息与 checkpoint 锚不匹配（历史已被压缩或轮转）")
+        if count == 0 and anchor_digest != "":
+            raise ContextAnchorMismatch("空串锚仅允许配对空历史（message_count == 0）的 checkpoint")
+        if self.session_file is not None:
+            lines = self.session_file.read_text(encoding="utf-8").splitlines()
+            meta = lines[0] if lines else ""
+            payload = (meta + "\n" if meta else "") + "".join(
+                json.dumps(m, ensure_ascii=False) + "\n" for m in messages[:count]
+            )
+            self.session_file.write_text(payload, encoding="utf-8", newline="\n")
+        self._messages = messages[:count]
 
     # -- 会话文件管理 -------------------------------------------------------
 

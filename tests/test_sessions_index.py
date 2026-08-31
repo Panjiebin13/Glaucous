@@ -16,11 +16,15 @@ from glaucous.sessions import paths as spaths
 from glaucous.sessions.index import SessionEntry, SessionIndex, derive_name, entry_from_file
 from glaucous.sessions.paths import (
     create_session_history,
-    index_path,
     migrate_legacy_sessions,
     project_dir,
     project_hash,
 )
+
+# 注意：index_path/sessions_root 不得 from-import 直接绑定——monkeypatch 改的是
+# 模块属性，直接绑定会绕过补丁污染真实 ~/.glaucous（用户实测事故 2026-08-31：
+# 损坏索引用例把 "{broken json!!" 写进了真实索引文件，导致每次启动都重建、
+# token 累计归零）。一律经 spaths.<name>() 动态取。
 
 
 @pytest.fixture()
@@ -99,8 +103,8 @@ class TestRebuild:
         # 两个项目的真实会话文件（用户级目录，rebuild 扫描范围）
         f1 = _make_session(tmp_path, "修复登录 bug 的会话", user_level=True)
         f2 = _make_session(tmp_path / "other", "另一个项目的会话", user_level=True)
-        # 手写损坏索引
-        index_file = index_path()
+        # 手写损坏索引（经模块属性取路径——fixture 补丁生效，不碰真实索引）
+        index_file = spaths.index_path()
         index_file.parent.mkdir(parents=True, exist_ok=True)
         index_file.write_text("{broken json!!", encoding="utf-8")
 

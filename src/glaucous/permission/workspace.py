@@ -11,6 +11,9 @@
 - v1.1 修订（用户实测反馈）：保护范围收窄——`.glaucous/` 下**唯一开放写的是
   `skills/`**（FR-28/create-skill 规范目标：用户技能资产，必须可写）；
   其余（sessions/audit.log/memory.json/plans/outputs/根下新文件）仍一律硬拦截。
+- v1.1-M5 修订（用户决策 2026-08-31，决策 6 重评开窗后选放宽）：`git_backed`
+  「git 兜底区」标志——工作区是 Git 仓库（checkpoint 可快照/回退）时区内写
+  尽可能放行；`.glaucous/` 写仍硬拦（快照排除、无 git 保证 + 审计底线）。
 """
 
 from __future__ import annotations
@@ -31,10 +34,18 @@ class WorkspaceEscape(RuntimeError):
 class Workspace:
     """工作区边界：沙箱校验 + 只读白名单 + 运行期目录写排除。"""
 
-    def __init__(self, root: Path, read_only_extra: Iterable[Path] = (), protected_dir: str = ".glaucous"):
+    def __init__(self, root: Path, read_only_extra: Iterable[Path] = (), protected_dir: str = ".glaucous",
+                 git_backed: bool = False):
         self._root = root.resolve()
         self._read_only_extra = tuple(p.resolve() for p in read_only_extra)
         self._protected = self._root / protected_dir
+        # git 兜底区（用户决策 2026-08-31）：工作区为 Git 仓库（checkpoint 可回退）
+        # 时区内写尽可能放行；非 Git 无兜底 → 维持严格定级（装配方注入，惰性探测）
+        self._git_backed = git_backed
+
+    @property
+    def git_backed(self) -> bool:
+        return self._git_backed
 
     @property
     def root(self) -> Path:

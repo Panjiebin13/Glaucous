@@ -8,6 +8,7 @@
 - GLAUCOUS_READONLY_EXTRA      区外只读白名单路径（冒号/分号分隔），环境探测免审批（概设 §5.4）
 - GLAUCOUS_CONTEXT_LIMIT       上下文 token 上限（预算/压缩/占用条共用，默认 128000，M2 Day4）
 - GLAUCOUS_MEMORY_TOP_N        事实记忆注入条数上限（存储全量、注入 Top-N，默认 50，M2 Day4）
+- GLAUCOUS_CHECKPOINT_MAX_KEEP  checkpoint 保留数量（超出淘汰最旧，默认 50，M4 FR-41）
 """
 
 from __future__ import annotations
@@ -28,6 +29,9 @@ DEFAULT_CONTEXT_LIMIT = 128_000
 
 # 事实记忆注入条数上限（概设 §7.2：条目数超限时按最近使用加权裁剪）
 DEFAULT_MEMORY_TOP_N = 50
+
+# checkpoint 保留数量（v1.1-M4 FR-41：超出自动淘汰最旧）
+DEFAULT_CHECKPOINT_MAX_KEEP = 50
 
 
 class ConfigError(RuntimeError):
@@ -53,6 +57,7 @@ class Config:
     read_only_extra: tuple[Path, ...] = field(default_factory=tuple)
     context_limit: int = DEFAULT_CONTEXT_LIMIT
     memory_top_n: int = DEFAULT_MEMORY_TOP_N
+    checkpoint_max_keep: int = DEFAULT_CHECKPOINT_MAX_KEEP
 
 
 def load_profile(env: dict[str, str] | None = None) -> LLMProfile:
@@ -111,6 +116,9 @@ def load_config(env: dict[str, str] | None = None) -> Config:
         read_only_extra=_load_read_only_extra(source),
         context_limit=_load_positive_int(source, "GLAUCOUS_CONTEXT_LIMIT", DEFAULT_CONTEXT_LIMIT),
         memory_top_n=_load_positive_int(source, "GLAUCOUS_MEMORY_TOP_N", DEFAULT_MEMORY_TOP_N),
+        checkpoint_max_keep=_load_positive_int(
+            source, "GLAUCOUS_CHECKPOINT_MAX_KEEP", DEFAULT_CHECKPOINT_MAX_KEEP
+        ),
     )
 
 

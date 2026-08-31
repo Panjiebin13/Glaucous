@@ -23,6 +23,14 @@ def clf(tmp_path: Path) -> CommandClassifier:
     return CommandClassifier(Workspace(root))
 
 
+@pytest.fixture()
+def clf_git(tmp_path: Path) -> CommandClassifier:
+    """git 兜底区定级器（用户决策 2026-08-31）：区内危险操作降级验证用。"""
+    root = tmp_path / "ws"
+    root.mkdir()
+    return CommandClassifier(Workspace(root, git_backed=True))
+
+
 class TestSafeWhitelist:
     def test_ls(self, clf: CommandClassifier) -> None:
         assert clf.classify("ls -la")[0] == Risk.SAFE
@@ -161,3 +169,31 @@ def test_redirect_dev_null_safe(clf: CommandClassifier) -> None:
     assert clf.classify('ls -la 2>/dev/null')[0] == Risk.SAFE
     # 保留真写语义：普通重定向仍是写操作
     assert clf.classify("echo hi > out.txt")[0] == Risk.WRITE
+
+
+class TestGitBackedDowngrade:
+    """git 兜底区降级（用户决策 2026-08-31）：区内危险操作降 WRITE，
+    区外/受保护/远端侧恒 DANGEROUS；非 Git 不降级（上方既有夹具已覆盖）。"""
+
+    def test_rm_dangerous_pattern_inside_downgraded(self, clf_git: CommandClassifier) -> None:
+        # `rm -rf .venv`/`rm -rf .` 命中危险模式但目标全在区内 → WRITE（可同类型豁免）
+        assert clf_git.classify("rm -rf .venv")[0] == Risk.WRITE
+        assert clf_git.classify("cd sub && rm -rf .")[0] == Risk.WRITE
+
+    def test_rm_outside_still_dangerous(self, clf_git: CommandClassifier) -> None:
+        assert clf_git.classify("rm -rf /")[0] == Risk.DANGEROUS
+        assert clf_git.classify("rm -rf ~")[0] == Risk.DANGEROUS
+
+    def test_rm_protected_still_dangerous(self, clf_git: CommandClassifier) -> None:
+        # .glaucous/ 不在快照内（无 git 保证）+ 审计底线：不降级
+        assert clf_git.classify("rm -rf .glaucous/audit.log")[0] == Risk.DANGEROUS
+
+    def test_git_worktree_patterns_downgraded(self, clf_git: CommandClassifier) -> None:
+        assert clf_git.classify("git reset --hard")[0] == Risk.WRITE
+        assert clf_git.classify("git clean -fd")[0] == Risk.WRITE
+        assert clf_git.classify("git checkout -- .")[0] == Risk.WRITE
+
+    def test_git_push_force_still_dangerous(self, clf_git: CommandClassifier) -> None:
+        # 远端侧无兜底，恒 DANGEROUS
+        assert clf_git.classify("git push --force")[0] == Risk.DANGEROUS
+        assert clf_git.classify("git push -f")[0] == Risk.DANGEROUS

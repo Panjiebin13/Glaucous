@@ -85,16 +85,23 @@ def _make_real_session_file(workspace: Path, sid_stem: str) -> Path:
     return target
 
 
-@pytest.fixture()
+@pytest.fixture(autouse=True)
 def fake_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """用户级目录重定向到 tmp（避免污染真实 ~/.glaucous）。"""
+    """用户级目录重定向到 tmp（避免污染真实 ~/.glaucous）。
+
+    autouse（用户实测事故 2026-08-31 修复）：本文件多个用例未显式声明本
+    fixture，_make_real_session_file 经 project_dir 把测试会话写进了真实
+    ~/.glaucous/sessions/；sessions_root 与 index_path 两侧模块属性同步打补丁。"""
     home = tmp_path / "home"
     from glaucous.sessions import index as index_mod
     from glaucous.sessions import paths as spaths
 
     root = lambda: home / ".glaucous" / "sessions"  # noqa: E731
+    ipath = lambda: home / ".glaucous" / "session_index.json"  # noqa: E731
     monkeypatch.setattr(spaths, "sessions_root", root)
+    monkeypatch.setattr(spaths, "index_path", ipath)
     monkeypatch.setattr(index_mod, "sessions_root", root)
+    monkeypatch.setattr(index_mod, "index_path", ipath)
 
 
 @pytest.fixture()

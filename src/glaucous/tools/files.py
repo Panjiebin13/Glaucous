@@ -176,17 +176,20 @@ class WriteFileTool(Tool):
         self._on_skill_write = on_skill_write
 
     def build_approval(self, args: dict[str, Any], mode: str) -> ApprovalAction | None:
-        """构造审批动作：区内写 WRITE；区外写 DANGEROUS（守卫优先级，不可批量豁免）。
+        """构造审批动作（v1.1-M5 修订，用户决策 2026-08-31）：
 
+        区内写 + git 兜底区 → 免审（checkpoint 可回退）；区内写非 Git → WRITE；
+        区外/受保护写 → DANGEROUS（守卫优先级，不可批量豁免）。
         detail 携带 unified diff（写操作审批展示用，Day3 Plan §4.3）。
         """
         path = str(args.get("path", ""))
         content = str(args.get("content", ""))
-        # 区内写 = WRITE（走审批）；区外/受保护/只读白名单写 = DANGEROUS（守卫优先级，
-        # 概设 §5.5 写区外）。注意不能用 classify_path 返回值（区内返回 SAFE 会污染审计标注），
+        # 区内写：不能用 classify_path 返回值（区内返回 SAFE 会污染审计标注），
         # 也不能用 is_outside（白名单路径 is_read_only=True 会被误判为区内）
         resolved = self._workspace.resolve(path)
         if self._workspace.is_within(resolved) and not self._workspace.is_protected(resolved):
+            if self._workspace.git_backed:
+                return None  # git 兜底区：区内写免审（可 /rollback 回退，用户决策）
             risk = Risk.WRITE
         else:
             risk = Risk.DANGEROUS
@@ -278,14 +281,17 @@ class EditFileTool(Tool):
         self._on_skill_write = on_skill_write  # 同 WriteFileTool：技能资产编辑后刷新索引
 
     def build_approval(self, args: dict[str, Any], mode: str) -> ApprovalAction | None:
-        """构造审批动作：区内写 WRITE；区外写 DANGEROUS（守卫优先级）。
+        """构造审批动作（v1.1-M5 修订，用户决策 2026-08-31，同 WriteFileTool）：
 
+        区内写 + git 兜底区 → 免审；区内写非 Git → WRITE；区外/受保护 → DANGEROUS。
         detail 携带替换前后 diff（审批展示用）。
         """
         path = str(args.get("path", ""))
-        # 区内写 = WRITE；区外/受保护/只读白名单写 = DANGEROUS（S-A 修复，见 WriteFileTool）
+        # 区内/区外/受保护定级（S-A 修复，见 WriteFileTool）
         resolved = self._workspace.resolve(path)
         if self._workspace.is_within(resolved) and not self._workspace.is_protected(resolved):
+            if self._workspace.git_backed:
+                return None  # git 兜底区：区内写免审（用户决策）
             risk = Risk.WRITE
         else:
             risk = Risk.DANGEROUS
