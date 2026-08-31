@@ -197,6 +197,14 @@
 - [x] 5.10 测试污染真实 ~/.glaucous 事故修复（用户反馈「每次启动都提示索引重建 + tokens 恒 0」，2026-08-31）：根因是 test_sessions_index 损坏索引用例经 from-import 直接绑定 index_path，绕过 monkeypatch 把 "{broken json!!" 写进真实索引文件，每次跑测试都损坏 → 每次启动重建（token_used 归零）。修复：改经模块属性动态取路径；test_sessions_commands fake_home 改 autouse 并补 index_path 双侧补丁；清理历史污染（63 个测试项目目录、索引 66→3 项目）；已验证跑测试不再触碰真实索引
 - [x] 5.11 权限矩阵放宽：git 兜底区（用户决策 2026-08-31，全量 336 passed）：工作区为 Git 仓库（checkpoint_store.available 探测，rebuild_loop 注入 Workspace.git_backed）时——区内 write_file/edit_file 免审；区内危险命令降级 WRITE（rm 危险模式目标全区内、git reset --hard/clean -f/checkout -- .，可同类型豁免）；不放宽：.glaucous/ 写（快照排除+审计底线）、区外写、git push --force（远端无兜底）；非 Git 工作区自动维持严格矩阵。已知边界：gitignored 文件（.venv 等）不进快照，删除不可回退；会话中途新 git init 需下次重建生效
 
+### V1.1-M6 测试与评测（8/31）
+
+- [x] 6.1 测试补齐全绿：概设 §11 七个增补测试文件均已落实（test_checkpoint_git / test_sessions_index（含迁移）/ test_subagent / test_spec_store+test_spec_pipeline / test_mode_default_build / test_rollback_context），全量 336 passed（WSL）
+- [x] 6.2 系统回顾与提交物文档：docs/Glaucous实现详解（v1.1）.md（三主线结构 + 底层机制 + 设计决策速查）、docs/M6需求合规对照表.md（赛事要求逐项比对 + 提交前终检清单 + 全历史零密钥核查）、docs/M6视频脚本与面试材料.md（2 分钟分镜脚本 + 1 分钟面试口述稿 + 高频追问预案）、README.md v1.1 叙事重写、docs/submission/README.txt（≤1000 汉字提交版）
+- [ ] 6.3 评测集实测（需真实模型，用户执行）：需求文档 §6 的 8 个用例（模糊需求/小任务/大任务全流程/改坏回退/拒绝回退/跨会话/子 agent 评审/底线拦截），场景清单见《实现详解》与既有 e2e 清单；实测后出评测报告（成功率/澄清触发率/回退正确率/审批拦截正确率/子 agent 隔离验证/消耗）
+- [ ] 6.4 视频录制（按 docs/M6视频脚本与面试材料.md 分镜，≤2 分钟、≤200MB、画面无密钥）与「姓名」.zip 打包提交（9/2 24:00 前）
+- [ ] ⚠ 9/2 24:00 硬截止：截止后不得再向仓库推送；最后一次 push 须在截止前完成（含仓库公开状态确认）
+
 ### V1.1-M3 会话管理代码评审建议项（r1，见 docs/reviews/202608302100-code-review-v11-m3-sessions-r1.md；B1/B2 已修复并经 r2/r3 聚焦复审放行；r3-S1 状态行已更新）
 
 - [ ] r3-S1 TODO.md 登记头部状态滞后自愈（本轮已更新，后续轮次保持同步）
