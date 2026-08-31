@@ -60,6 +60,7 @@ glaucous --workspace /path/to/project    # 或 ./start.sh
 ## 文档
 
 - [Glaucous 实现详解（v1.1）](docs/Glaucous实现详解（v1.1）.md) —— 功能与底层机制全解（三主线结构 + 设计决策速查）
+- [Glaucous 系统详细设计与实现方案](docs/Glaucous系统详细设计与实现方案.md) —— 全系统深度细节（20 章：数据结构/协议/实现路径/设计决策）
 - [编程智能体需求文档 v1.1](docs/编程智能体需求文档v1.1.md)（64 条 FR）· [概要设计说明书 v1.1](docs/编程智能体概要设计说明书v1.1.md)
 - [开发计划表 v1.1](docs/Glaucous开发计划表v1.1.md) · [里程碑 spec 与评审报告](docs/designs/)（`docs/reviews/` 40+ 份）
 - [M6 需求合规对照表](docs/M6需求合规对照表.md) · [视频脚本与面试材料](docs/M6视频脚本与面试材料.md)
