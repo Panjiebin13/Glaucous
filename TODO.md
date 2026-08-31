@@ -181,7 +181,7 @@
 - [ ] r1-S2 残余：M5 复用 store.create 时若需区分失败原因，建议返回错误对象而非 None（当前异常路径经审计 error 字段已可追溯）
 - [x] 决策 6（用户决策 2026-08-31，二次重评：选放宽 → 见 5.11）：checkpoint 落地后区内写放宽窗口开启，用户明确「只要 git 能兜底都尽可能放开」——实现为 git 兜底区矩阵（区内写免审 + 区内危险命令降 WRITE），.glaucous/ 写与区外写维持严格
 - [ ] 决策 7：auto_rollback_on_reject 配置与 checkpoint 可关开关，M6 测试与评测期统一收口
-- [ ] r1-S13 残余：本批包含 11 个文件的一次性行尾归一化（CRLF→LF，内容等价），后续 Windows 侧编辑建议配合 .gitattributes 治理
+- [x] r1-S13 已根治（2026-08-31）：新增 .gitattributes（*.sh text eol=lf），Windows 检出也保持 LF，WSL bash 可直接执行；其余文本文件的行尾归一化不再影响功能
 
 ### V1.1-M5 Spec 子系统（8/31）
 
