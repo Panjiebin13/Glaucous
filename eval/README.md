@@ -7,7 +7,8 @@
 
 ```
 eval/
-├── run_case.sh              # 运行器：复制模板 → git init → 下达任务 → 判定
+├── run_case.sh              # 运行器：复制模板 → git init → 下达任务 → 判定（v1.1）
+├── run_v10.sh               # v1.0 对照运行器：方案卡选② + 审批兜底应答（见评测报告 §五）
 └── cases/
     ├── e1-small-task/       # 小任务回归（两版本都应成功）
     ├── e2-engineering/      # 大任务全流程（核心对照）
