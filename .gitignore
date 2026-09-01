@@ -24,3 +24,7 @@ venv/
 
 # 临时测试脚本（rich console.input 演示）
 1.py
+
+# 提交材料区（视频等大文件不入库，随「姓名」.zip 打包提交）
+docs/Glaucous演示视频/
+*.mp4
