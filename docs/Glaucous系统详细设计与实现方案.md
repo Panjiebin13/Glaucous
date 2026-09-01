@@ -1,6 +1,6 @@
 # Glaucous 系统详细设计与实现方案
 
-- 版本：v1.1 终版（2026-08-31）；覆盖 v1.0 原型到 v1.1 全部里程碑的最终形态
+- 版本：v1.1 完整版（2026-09-01 增补：§14 全局约束与体验扩展深度展开、§15 命令全表）；覆盖 v1.0 原型到 v1.1 全部里程碑的最终形态
 - 定位：**深入了解细节**用的设计文档——每个子系统讲清「数据结构 / 关键算法与协议 / 实现路径 / 设计决策」
 - 配套阅读：[Glaucous实现详解（v1.1）.md](Glaucous实现详解（v1.1）.md)（三主线叙事版）、[编程智能体概要设计说明书v1.1.md](编程智能体概要设计说明书v1.1.md)（架构决策版）
 - 代码规模：约 1.2 万行（src + tests）；38 个测试文件、336 个测试；零 agent 框架
@@ -23,7 +23,7 @@
 11. Checkpoint（checkpoint/）
 12. Spec 子系统（spec/）
 13. 会话管理（sessions/）
-14. 体验扩展（extensions/）
+14. 全局约束与体验扩展（prompts + extensions/）
 15. 命令系统（commands.py）
 16. 交互与渲染（theme / renderer / ThinkingView）
 17. 配置系统（config.py）
@@ -465,14 +465,85 @@ draft → reviewing → approved → executing → code_review → verified
 
 ---
 
-## 14. 体验扩展（extensions/）
+## 14. 全局约束与体验扩展（prompts + extensions/）
 
-| 模块 | 机制 |
-|---|---|
-| **规则**（rules） | `glaucous.md` 项目规则 + `~/.glaucous/rules.md` 全局规则，启动注入 system prompt；`/rules` 查看；/init 生成项目规则草稿（扫描工作区 → 模型起草 → 确认后写入，拒覆盖） |
-| **记忆**（memory） | 事实记忆双作用域（全局 `~/.glaucous/memory.json` + 项目 `<工作区>/.glaucous/memory.json`）；`memory_save/load` 工具 + `/memory add\|del`；启动按最近使用加权取 Top-N 注入；写入原子化，损坏容错为空表重建（宁丢不崩） |
-| **技能**（skills） | 三层扫描（包内置 → 全局 → 项目，同名后覆盖）；启动只注入索引（`- name: description`）；两段式惰性加载：模型判断相关 → `load_skill` 取正文（正文入史，会话内有效）；`/skill` 手动调用（组装任务立即执行一轮）；`.glaucous/skills/` 写入后刷新索引即时生效；frontmatter 畸形跳过并记告警 |
-| **init_draft** | 扫描工作区（语言/框架/测试/依赖）→ 模型起草规则草稿 |
+高自主与可控的张力由两套机制解决：**全局约束**划定「什么不能做、什么要先做」的边界；**体验扩展**（记忆/规则/技能）让智能体记得住环境、守得住约定、沉淀经验。约束是「硬边界」，扩展是「软知识」，两者共同构成 system prompt 的完整语义。
+
+### 14.1 全局约束体系：三层防线
+
+| 层 | 机制 | 性质 |
+|---|---|---|
+| ① 提示词引导层 | BASE_PROMPT 七段结构（ui/prompts.py） | 软约束：引导模型行为，减少无效试探 |
+| ② 规则注入层 | glaucous.md 双层规则**全量注入** | 用户定义的硬规则（提示词内「必须遵守」） |
+| ③ 执行硬保证层 | 声明层工具过滤 + 派发校验 + 权限门禁 | 代码级保证：不依赖模型自觉 |
+
+**设计原则：行为约束不靠提示词。** 提示词只做引导；真正禁止的行为（Plan 模式写文件、`.glaucous/` 写、区外写）由声明层（工具根本不发给模型）与执行层（dispatch 拦截）双保险硬保证（§9 模式快照、§7.2 派发管线、§8.4 矩阵）。软约束与硬保证互补：软约束减少模型撞墙次数，硬保证决定最终边界。
+
+**BASE_PROMPT 七段结构**（静态注入——同时描述两种模式的行为规则，不随 mode 动态重写：动态重写破坏消息不可变性，且行为约束已由③层硬保证）：
+1. **角色定义**：终端编程智能体，通过工具阅读代码后回答或探索；
+2. **工作准则**：回答前先看真实文件不猜测；引用代码用「文件:行号」格式；简体中文、先结论后依据；
+3. **会话模式引导**：Build 常驻执行（启动即干活）；Plan 只读研究——以「看不到写工具即为 Plan」自感知，需动手走 submit_plan 或请用户 /build；
+4. **先澄清后开发（FR-37）**：动手前必须明确需求边界（改哪些文件/期望行为/隐含约束），含糊先 ask_user，**不得在需求未澄清时动手修改**；小任务简述 2~3 句即可动手；大任务建议 /spec；
+5. **高风险主动确认**：大范围重构/删除/改配置/涉及 `.glaucous/` 与规则文件 → 先 submit_plan 批准再执行；普通任务不打断；
+6. **Build 实施约定**：先 read 后 edit（old 文本唯一匹配）；破坏性命令即使自动放行也会被单独拦截；**被拒绝时根据理由调整方案，不原样重试**（FR-12）；全部完成后汇报（做了什么/改了什么/验证情况）；
+7. **求助节奏 + 扩展机制引导**：环境类失败先自试 2 次再 ask_user，提问具体可答附候选选项（FR-18，不得动辄提问也不得死磕）；用户回答含环境事实 → memory_save 沉淀（FR-19）；技能索引相关先 load_skill（FR-28）；大块探索/隔离评审用 spawn_agent（FR-60~64）；大而复杂任务建议 /spec（FR-52）。
+
+**system prompt 组装协议**（`build_system_prompt`）：
+```
+BASE_PROMPT → 当前工作区路径 → 【规则段】 → 【记忆段】 → 【技能索引段】（空段省略）
+```
+每会话启动时现读现组装（规则/记忆/技能索引均为当次磁盘快照）；**子 agent 的 prompt 不继承记忆与技能索引**（评审员需要任务上下文，不是主 agent 的全部包粘，§10.2），且 SUB_AGENT_PROMPT 自带三条硬约束：用户不在线不得 ask_user、不用 submit_plan（风险由主 agent 派发前判断）、终答必须且只能是四段报告。
+
+### 14.2 多层记忆（memory.py，FR-21/22）
+
+**定位**：环境事实的跨会话沉淀——记的是**事实**（解释器路径、构建命令、项目结构事实），不是行为偏好。
+
+**双作用域存储**：
+| 作用域 | 路径 | 信任范围 |
+|---|---|---|
+| global | `~/.glaucous/memory.json` | 跨项目环境事实（如「本机无 python，用 python3」） |
+| project | `<workspace>/.glaucous/memory.json` | 项目专属事实 |
+
+条目结构 `{content, category, created_at, last_used}`；JSON 数组格式（可读可手工编辑——存储格式本身即管理面）。去重作用域 = 单文件内：同一事实在全局与项目分属不同信任范围，**跨作用域不去重**。
+
+**写入协议**（`add`）：同作用域 content 完全一致 → 不新增，刷新 `last_used/category`（去重，返回 False）；否则追加条目记双时间戳。**原子写**（临时文件 + `os.replace`）防崩溃半写；读容错：缺失/非法 JSON/非数组 → 空表重建（**宁丢不崩**，与审计「尽力而为」哲学一致）；写失败静默不阻断主流程。
+
+**注入算法**（`load_injection`，Top-N）：
+- **存全量、注入裁剪**：存储文件永不自动裁剪；注入时双作用域合并，按 `(last_used, created_at)` 降序取 Top-N（默认 50，`GLAUCOUS_MEMORY_TOP_N`）——「按 category 与最近使用加权裁剪」的简化实现（category 以标注保留，最近使用为主权重）；
+- **注入即使用**：被选中条目刷新 `last_used` 并落盘——常注入的事实自然上浮，久未用的自然下沉（LRU 语义，零额外配置）；
+- 注入格式 `- [作用域][category] content`；无记忆返回空串 → prompts 层省略该注入段。
+
+**三个写入口**：①`memory_save` 工具（模型主动沉淀，BASE_PROMPT 求助节奏段明确要求环境事实沉淀；可选 scope 参数）；②`/memory add|del`（用户管理，按 0-based 序号删）；③手编 JSON 文件。`memory_load` 按作用域读全量（不受 Top-N 限制，模型回取通道）。
+
+**记忆闭环**：ask_user 回答含环境事实 → 模型 memory_save 沉淀 → 下次会话注入 → 不再重复询问。评测中观察到的「`python` 不存在 → 自纠 `python3` 并沉淀记忆，后续用例直接复用」即此闭环的实证。
+
+### 14.3 全局规则（rules.py，FR-20）
+
+- **双层**：全局 `~/.glaucous/glaucous.md`（跨项目）+ 项目 `<workspace>/glaucous.md`；注入时全局段在前、项目段在后（更具体的规则更靠后，贴近尾部模型注意力更强）；
+- **全量注入永不裁剪——规则被裁剪等于没规则**；单文件超 4000 字符只在段尾附「（规则过长，建议精简）」提示，不截断正文；
+- 缺失/读失败/解码失败 → 空段省略（首用用户无规则文件是常态，不报错）；
+- 每次会话启动现读磁盘（「每次会话自动生效」）；`/rules` 查看；草稿生成见 §14.5。
+
+### 14.4 技能系统（skills.py，FR-28）
+
+**Skill = 目录 + SKILL.md**（frontmatter 声明 name/description，正文为可执行步骤）——把工作流包装成可复用资产的轻量扩展面。
+
+**三层扫描**（启动一次）：包内置资产（`importlib.resources` 取 `assets/skills/`，打包形态异常 → 降级为无内置）→ `~/.glaucous/skills/` → `<workspace>/.glaucous/skills/`；**同名后覆盖**（项目 > 全局 > 内置，更近作用域优先）。
+
+**frontmatter 解析**：`---` 分隔线 + `key: value` 行；缺失/未闭合 → 跳过该技能并记 `warnings`（一个坏技能不拖垮启动）。
+
+**两段式惰性加载**（成本控制核心）：
+1. 启动只注入索引 `- name: description`（<30 token/个）；
+2. 模型判断相关 → `load_skill` 取正文（**正文入史，会话内有效**，跨会话自然失效——不常驻、不泄漏）；重复加载幂等；
+- `/skills` 列表（含来源标签 内置/全局/项目 + 已加载标记）；`/skill <名> [任务]` 手动调用（组装任务文本立即执行一轮，纯读取不标记加载态）；
+- `.glaucous/skills/` 是受保护目录下唯一开放写的子目录（技能资产）——写入后刷新索引即时生效（§7.3）。
+- 内置技能 5 个：brief-project-intro / introduce-project / code-review / release-checklist / create-skill（后者引导模型创建项目级技能并告知生效时机）。
+
+### 14.5 /init 规则草稿（init_draft.py，FR-23）
+
+- **浅扫克制**：深度 ≤2、跳隐藏与依赖目录（.git/node_modules/.venv/dist…）、条目上限 50（目录以 `/` 后缀区分）——「草稿」定位，不刷屏；
+- **特征识别**：7 类特征文件（pyproject.toml/requirements.txt/package.json/pom.xml/build.gradle/go.mod/Cargo.toml）→ 项目描述行；README 首行作为标题补充；
+- **占位模板四节**：项目概况（自动识别）/构建与测试命令/编码约定/禁止操作（待填写）；扫描结果交模型修订成稿 → **用户确认后才写盘**；已存在 → **拒绝覆盖**只提示（规则文件是团队资产）。
 
 ---
 
@@ -480,6 +551,22 @@ draft → reviewing → approved → executing → code_review → verified
 
 `ReplContext` 是 REPL 可变状态的唯一聚合（dataclass）：workspace/config/llm/history/state/loop/audit/renderer/pipeline + 会话管理三字段 + checkpoint 两字段 + 子 agent 归属三哨兵 + thinking 等。命令层与回调层一律经它间接引用（**闭包不捕获旧对象**，/clear、/resume 整体替换后仍正确）。
 23 个命令单一数据源 `COMMAND_META`（/help 与补全共用）；分派：`handle_command` 返回 `True`（继续）/`"exit"`；未识别命令打 /help 可用列表（不发给 LLM）。交互类命令遵守 `live_hooks` pause/resume 协议（阻塞交互前后暂停/恢复思考区）。
+
+**命令全表**（按 COMMAND_META 注册序）：
+
+| 命令 | 用途 | 命令 | 用途 |
+|---|---|---|---|
+| /help | 列出全部命令 | /context | 上下文窗口三档（128K/512K/1M） |
+| /plan | 切 Plan 研究模式（只读） | /spec | 发起 Spec 流程（支持 status\|cancel） |
+| /build | 切 Build 执行模式（可选策略） | /specs | 列出全部 Spec 及状态 |
+| /compact | 手动压缩（L1+L2） | /rollback | 回退文件到历史 checkpoint |
+| /clear | 开始新会话（旧会话保留） | /model | 模型档案列表/切换（连通性校验） |
+| /resume | 恢复会话（前缀模糊匹配） | /memory | 记忆查看与 add\|del 管理 |
+| /sessions | 会话列表/搜索/切换（跨项目） | /rules | 查看全局/项目规则 |
+| /rename | 重命名当前会话 | /skills /skill | 技能列表 / 手动调用执行 |
+| /fork | 分叉会话（另存为语义） | /init | 生成 glaucous.md 草稿 |
+| /stats | 会话与全局统计 | /stop /exit | 优雅结束（已落盘）/ 退出 |
+| /view | 查看工作区文件（按类型渲染） | /expand /collapse | 回看/收起本会话思考过程 |
 补全：命令段前缀匹配（meta 显示）；参数段注册表（/view 路径、/model 模型名、/build 策略、/skill 技能名、/sessions 会话名、/spec 子命令）。
 非 TTY 全链路降级：箭头选择 → 数字输入；思考区 → 直打；卡片 → 纯文本。
 
