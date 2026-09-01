@@ -3,6 +3,7 @@ Glaucous 编程智能体
 【Git 仓库】
 https://github.com/Panjiebin13/Glaucous
 完整提交历史保留：一个任务一次提交，从 M0 原型到 v1.1 全部里程碑可追溯。
+(github可以看到有两个账号的提交，另一个账号是本人在公司的账号，并非两人开发！！！)
 
 【如何运行】
 环境：Python 3.11+。
