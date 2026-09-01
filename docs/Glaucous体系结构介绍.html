@@ -1,0 +1,341 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Glaucous · 编程智能体体系结构</title>
+<style>
+  :root {
+    --celadon: #4A90A4;        /* 天青主色 */
+    --celadon-dark: #2C5F6E;
+    --celadon-light: #E8F4F7;
+    --sky: #87CEEB;
+    --ink: #24343B;
+    --ink-soft: #5A6B72;
+    --card: #FFFFFF;
+    --line: #D7E8EC;
+    --amber: #D98E32;
+    --green: #3E9B6E;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: "Segoe UI", "Microsoft YaHei", "PingFang SC", sans-serif;
+    background: linear-gradient(180deg, #F4FAFB 0%, #EDF5F7 100%);
+    color: var(--ink); line-height: 1.75;
+  }
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 0 24px; }
+
+  /* ---------- 顶部 ---------- */
+  header {
+    background: linear-gradient(135deg, var(--celadon-dark) 0%, var(--celadon) 60%, var(--sky) 100%);
+    color: #fff; padding: 64px 0 48px; position: relative; overflow: hidden;
+  }
+  header::after {  /* 海鸥滑翔意象的极简弧线 */
+    content: ""; position: absolute; right: -80px; top: -120px; width: 420px; height: 420px;
+    border: 2px solid rgba(255,255,255,.25); border-radius: 50%;
+  }
+  header h1 { font-size: 40px; letter-spacing: 2px; font-weight: 700; }
+  header .sub { font-size: 17px; opacity: .92; margin-top: 10px; }
+  header .motto { margin-top: 22px; font-size: 15px; opacity: .85; border-left: 3px solid rgba(255,255,255,.6); padding-left: 12px; }
+  .statbar { display: flex; flex-wrap: wrap; gap: 14px; margin-top: 30px; }
+  .statbar span {
+    background: rgba(255,255,255,.16); border: 1px solid rgba(255,255,255,.35);
+    border-radius: 999px; padding: 5px 16px; font-size: 13.5px;
+  }
+
+  /* ---------- 导航 ---------- */
+  nav {
+    position: sticky; top: 0; z-index: 9; background: rgba(255,255,255,.94);
+    backdrop-filter: blur(6px); border-bottom: 1px solid var(--line);
+  }
+  nav .wrap { display: flex; flex-wrap: wrap; gap: 4px; padding-top: 8px; padding-bottom: 8px; }
+  nav a {
+    color: var(--celadon-dark); text-decoration: none; font-size: 14px;
+    padding: 4px 12px; border-radius: 6px; white-space: nowrap;
+  }
+  nav a:hover { background: var(--celadon-light); }
+
+  /* ---------- 通用 ---------- */
+  section { padding: 52px 0 8px; }
+  h2 {
+    font-size: 26px; color: var(--celadon-dark); margin-bottom: 6px;
+    display: flex; align-items: center; gap: 10px;
+  }
+  h2 .no { font-size: 13px; background: var(--celadon); color: #fff; border-radius: 6px; padding: 2px 9px; font-weight: 600; }
+  .lead { color: var(--ink-soft); margin-bottom: 24px; font-size: 15px; max-width: 860px; }
+
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(310px, 1fr)); gap: 18px; }
+  .card {
+    background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+    padding: 20px 22px; transition: box-shadow .2s, transform .2s;
+  }
+  .card:hover { box-shadow: 0 6px 22px rgba(44,95,110,.12); transform: translateY(-2px); }
+  .card h3 { font-size: 17px; color: var(--celadon-dark); margin-bottom: 8px; display: flex; align-items: center; gap: 8px; }
+  .card h3 .tag { font-size: 11px; color: var(--celadon); border: 1px solid var(--celadon); border-radius: 4px; padding: 0 6px; font-weight: 500; }
+  .card ul { padding-left: 18px; font-size: 14px; color: var(--ink-soft); }
+  .card li { margin: 4px 0; }
+  .card b { color: var(--ink); }
+  .card .impl { margin-top: 10px; font-size: 12.5px; color: #8AA0A8; border-top: 1px dashed var(--line); padding-top: 8px; }
+  code { background: var(--celadon-light); color: var(--celadon-dark); border-radius: 4px; padding: 1px 6px; font-size: .92em; font-family: Consolas, monospace; }
+
+  /* ---------- 架构图 ---------- */
+  .arch { display: flex; flex-direction: column; gap: 10px; margin: 10px 0 26px; }
+  .layer {
+    border-radius: 12px; padding: 14px 18px; border: 1px solid var(--line);
+    display: flex; align-items: flex-start; gap: 14px; flex-wrap: wrap; background: #fff;
+  }
+  .layer .lname { font-weight: 700; font-size: 15px; min-width: 86px; color: #fff; border-radius: 8px; padding: 6px 10px; text-align: center; }
+  .layer .blocks { display: flex; flex-wrap: wrap; gap: 8px; flex: 1; }
+  .layer .blk { background: var(--celadon-light); border: 1px solid var(--line); border-radius: 8px; padding: 5px 12px; font-size: 13px; }
+  .layer .blk small { display: block; color: var(--ink-soft); font-size: 11.5px; }
+  .l-ui   .lname { background: var(--sky); color: var(--celadon-dark); }
+  .l-orch .lname { background: var(--celadon); }
+  .l-cap  .lname { background: var(--celadon-dark); }
+  .l-base .lname { background: #1F4652; }
+  .arrowline { text-align: center; color: var(--celadon); font-size: 18px; line-height: 1; }
+
+  /* ---------- 主线映射 ---------- */
+  table { width: 100%; border-collapse: collapse; background: #fff; border-radius: 12px; overflow: hidden; border: 1px solid var(--line); font-size: 14px; }
+  th { background: var(--celadon); color: #fff; padding: 10px 14px; text-align: left; font-weight: 600; }
+  td { padding: 10px 14px; border-top: 1px solid var(--line); vertical-align: top; }
+  tr:nth-child(even) td { background: #F7FBFC; }
+
+  /* ---------- 数据条 ---------- */
+  .facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 14px; }
+  .fact { background: #fff; border: 1px solid var(--line); border-left: 4px solid var(--green); border-radius: 10px; padding: 14px 16px; font-size: 14px; }
+  .fact b { display: block; color: var(--celadon-dark); font-size: 15px; margin-bottom: 3px; }
+
+  footer { margin-top: 56px; padding: 26px 0 40px; border-top: 1px solid var(--line); color: var(--ink-soft); font-size: 13px; }
+  footer a { color: var(--celadon-dark); }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="wrap">
+    <h1>Glaucous <span style="font-size:18px;font-weight:400;opacity:.85">· 雨过天青</span></h1>
+    <div class="sub">完全从零自研的编程智能体（Coding Agent）——不依赖任何 agent 框架</div>
+    <div class="motto">设计宗旨：<b>高自主 · 跑得动长任务 · 尽可能少打扰用户</b><br>
+    对话管理、工具执行、输出解析、终止条件、错误处理、上下文工程、权限与兜底——全部自研。</div>
+    <div class="statbar">
+      <span>🧪 336 个测试全绿</span>
+      <span>📑 40+ 份评审报告留痕</span>
+      <span>🛠 14 个本地工具</span>
+      <span>📦 0 框架依赖</span>
+      <span>🏗 v1.1 六大里程碑（M1~M6）</span>
+    </div>
+  </div>
+</header>
+
+<nav><div class="wrap">
+  <a href="#philo">设计哲学</a><a href="#arch">分层架构</a><a href="#mem">多层记忆与全局约束</a>
+  <a href="#ctx">上下文工程</a><a href="#perm">权限与安全兜底</a><a href="#spec">Spec 流水线</a>
+  <a href="#multiagent">多 Agent 协作</a><a href="#session">会话与工具</a><a href="#eval">评测证据</a><a href="#docs">文档索引</a>
+</div></nav>
+
+<div class="wrap">
+
+<section id="philo">
+  <h2><span class="no">01</span>设计哲学与三条主线</h2>
+  <p class="lead">一切机制围绕一个问题：如何让智能体长时间自主工作，同时不出事、不失控、不刷屏打扰用户。三条设计主线支撑这个目标。</p>
+  <div class="cards">
+    <div class="card"><h3>🧭 主线一 · 长任务跑得动</h3>
+      <ul><li>大任务走 <b>Spec 流水线</b>：澄清 → 书面规格 → 双评审 → 逐任务执行 → 验收；</li>
+      <li>子 agent 隔离评审，四级上下文压缩，长任务跑几十步上下文占用仍是个位数。</li></ul></div>
+    <div class="card"><h3>💬 主线二 · 需求先说清</h3>
+      <ul><li>大任务强制澄清访谈（箭头选择卡），确认清楚才动手；</li>
+      <li><code>/fork</code> 分叉会话先讨论想法，不污染主线会话。</li></ul></div>
+    <div class="card"><h3>🛡 主线三 · 安全是自主的前提</h3>
+      <ul><li>每轮任务自动打 Git 快照（checkpoint），改坏一条命令回退；</li>
+      <li>权限矩阵判据是「<b>有无兜底</b>」：快照兜得住就放行，兜不住坚决拦。</li></ul></div>
+  </div>
+</section>
+
+<section id="arch">
+  <h2><span class="no">02</span>分层体系结构</h2>
+  <p class="lead">四层结构：交互层负责人机界面，编排层负责「想清楚怎么干」，能力层提供工具与约束，基座层提供模型通道与持久化。每层只依赖下一层。</p>
+  <div class="arch">
+    <div class="layer l-ui"><div class="lname">交互层</div><div class="blocks">
+      <div class="blk">终端 REPL 与命令面<small>16 个斜杠命令 · 补全</small></div>
+      <div class="blk">渲染引擎<small>思考区 · Markdown 终答卡 · 箭头选择</small></div>
+      <div class="blk">状态栏<small>模型/模式/上下文占用环</small></div></div></div>
+    <div class="arrowline">▼</div>
+    <div class="layer l-orch"><div class="lname">编排层</div><div class="blocks">
+      <div class="blk">主循环<small>tool_calls 派发 · 解析熔断 · 终止条件</small></div>
+      <div class="blk">模式体系<small>Plan 只读研究 / Build 常驻执行</small></div>
+      <div class="blk">Spec 流水线<small>状态机 · 双评审循环 · 执行管线</small></div>
+      <div class="blk">多 Agent 调度<small>spawn_agent 隔离派发</small></div></div></div>
+    <div class="arrowline">▼</div>
+    <div class="layer l-cap"><div class="lname">能力层</div><div class="blocks">
+      <div class="blk">工具系统<small>14 个本地工具 · 统一契约</small></div>
+      <div class="blk">权限门禁<small>三级定级 · 授权策略 · 底线守卫</small></div>
+      <div class="blk">上下文工程<small>四级压缩 · 三档窗口</small></div>
+      <div class="blk">记忆与规则<small>双作用域记忆 · glaucous.md 约束</small></div>
+      <div class="blk">Checkpoint<small>Git 快照 · /rollback</small></div></div></div>
+    <div class="arrowline">▼</div>
+    <div class="layer l-base"><div class="lname">基座层</div><div class="blocks">
+      <div class="blk">LLM 通道<small>OpenAI 兼容 · 流式解析 · 热切换</small></div>
+      <div class="blk">会话持久化<small>用户级 JSONL · 侧边索引</small></div>
+      <div class="blk">审计与产物落盘<small>audit.log · outputs/ · specs/</small></div>
+      <div class="blk">配置与密钥治理<small>env 注入 · 零入库</small></div></div></div>
+  </div>
+</section>
+
+<section id="mem">
+  <h2><span class="no">03</span>多层记忆与全局约束</h2>
+  <p class="lead">让智能体「记得住环境、守得住规矩」的两套机制：记忆自下而上沉淀事实，约束自上而下划定行为边界。</p>
+  <div class="cards">
+    <div class="card"><h3>🧠 多层记忆体系 <span class="tag">跨会话沉淀</span></h3>
+      <ul>
+        <li><b>双作用域</b>：全局 <code>~/.glaucous/memory.json</code>（跨项目环境事实，如「本机要用 python3」）+ 项目 <code>.glaucous/memory.json</code>（项目专属事实）；</li>
+        <li><b>存全量、注入裁剪</b>：存储永不自动裁剪，注入时按最近使用取 Top-N，控制 system prompt 成本；</li>
+        <li>agent 可用 <code>memory_save</code> 主动沉淀，<code>/memory</code> 命令人工增删查；原子写入 + 损坏容错（宁丢不崩）。</li>
+      </ul><div class="impl">extensions/memory.py · tools/memory_tool.py · commands.py</div></div>
+    <div class="card"><h3>📏 全局约束（三层防线） <span class="tag">软引导 + 硬保证</span></h3>
+      <ul>
+        <li><b>提示词引导层</b>：BASE_PROMPT 工作准则——先看真实文件再回答、<b>需求未澄清不动手修改</b>、高风险任务主动出方案确认；</li>
+        <li><b>规则注入层</b>：<code>glaucous.md</code> 双层规则（全局 + 项目）每次启动注入，<b>全量永不裁剪</b>；</li>
+        <li><b>执行硬保证层</b>：行为约束不靠提示词——声明层过滤可用工具（如 Plan 模式无写工具），执行层在派发时校验权限与边界。</li>
+      </ul><div class="impl">ui/prompts.py · extensions/rules.py · tools/base.py</div></div>
+    <div class="card"><h3>🧰 技能系统 <span class="tag">惰性加载</span></h3>
+      <ul>
+        <li>SKILL.md 技能文件按需 <code>load_skill</code> 加载，system prompt 只注入 name+description 索引，不占常驻上下文；</li>
+        <li>内置技能（项目介绍、代码评审、发布清单、创建技能）随包分发，项目级技能放 <code>.glaucous/skills/</code>。</li>
+      </ul><div class="impl">extensions/skills.py · assets/skills/</div></div>
+  </div>
+</section>
+
+<section id="ctx">
+  <h2><span class="no">04</span>上下文工程</h2>
+  <p class="lead">长任务的物理极限是上下文窗口。四级压缩管线按「成本递增、侵入性递增」排列，逐级兜底。</p>
+  <div class="cards">
+    <div class="card"><h3>📊 四级压缩管线</h3>
+      <ul>
+        <li><b>L0 输出截断</b>：超长工具输出截断 + 全文落盘 <code>outputs/</code>，可 <code>read_output</code> 回取（信息零丢失）；</li>
+        <li><b>L1 本地裁剪</b>：零模型开销，按轮次结构裁剪冗余派生消息；</li>
+        <li><b>L2 模型摘要</b>：水位 85% 触发，语义压缩并保关键事实；</li>
+        <li><b>预算优雅终止</b>：最后防线，不崩会话。</li>
+      </ul><div class="impl">context/budget.py · context/compactor.py</div></div>
+    <div class="card"><h3>🎛 三档窗口与占用可视</h3>
+      <ul>
+        <li><code>/context</code> 运行时切档：<b>128K / 512K / 1M</b>（最大 1M），压缩阈值与子任务预算自动跟随；</li>
+        <li>状态栏实时占用环（绿/黄/红三档）；方案锚防压缩后任务丢失（压缩后仍可回读方案全文）。</li>
+      </ul><div class="impl">commands.py · agent/state.py</div></div>
+  </div>
+</section>
+
+<section id="perm">
+  <h2><span class="no">05</span>权限系统与安全兜底</h2>
+  <p class="lead">「敢让它自动跑」的底气来自这里：权限判据不是操作吓不吓人，而是有没有兜底。</p>
+  <div class="cards">
+    <div class="card"><h3>🚦 三级定级 × 授权策略</h3>
+      <ul>
+        <li>操作定级 <code>SAFE / WRITE / DANGEROUS</code>（命令分类器 + 路径守卫）；</li>
+        <li>授权策略 <code>auto-approve / per-action / deep-review</code>，审批卡支持「同意 / 同类型豁免 / 拒绝并回退」；</li>
+        <li>全部决策写 <code>audit.log</code> 审计。</li></ul>
+      <div class="impl">permission/classifier.py · approval.py · risk.py</div></div>
+    <div class="card"><h3>🏖 Git 兜底区矩阵 <span class="tag">v1.1 核心决策</span></h3>
+      <ul>
+        <li>工作区是 Git 仓库 → 区内文件写 <b>免审</b>（快照可精确回退）、区内危险命令降级为可豁免；</li>
+        <li><b>恒定守卫</b>：<code>.glaucous/</code> 写、区外写、<code>push --force</code> 永不放宽——快照兜不住的地方坚决拦；</li>
+        <li>非 Git 工作区自动退回严格矩阵。</li></ul>
+      <div class="impl">permission/workspace.py · tools/files.py</div></div>
+    <div class="card"><h3>📸 Checkpoint 回退</h3>
+      <ul>
+        <li>临时索引五步法打 Git 快照（捕获 untracked，不碰真实索引），保留最近 50 个；</li>
+        <li><code>/rollback</code> 一键还原（变更清单确认卡 + 精确还原）；审批「拒绝」可联动自动回退；</li>
+        <li>快照刻意排除 <code>.glaucous/</code>（运行态与审计防篡改）。</li></ul>
+      <div class="impl">checkpoint/git_snapshots.py · commands.py</div></div>
+  </div>
+</section>
+
+<section id="spec">
+  <h2><span class="no">06</span>Spec 流水线（大任务一等公民）</h2>
+  <p class="lead">竞品调研结论：主流 coding agent 都没有内置的规格阶段。Glaucous 把 Spec 做成产品级一等公民——大方案与大任务的书面契约。</p>
+  <div class="cards">
+    <div class="card"><h3>🔄 完整生命周期状态机</h3>
+      <ul><li><code>draft → reviewing → approved → executing → code_review → verified / archived</code>，修订回环只增轮次号；</li>
+      <li>Spec 产物落盘 <code>.glaucous/specs/</code>，全程可追溯。</li></ul>
+      <div class="impl">spec/store.py（状态机 + frontmatter）</div></div>
+    <div class="card"><h3>🔁 双评审循环（各 ≤3 轮）</h3>
+      <ul><li><b>Spec 评审</b>：子 agent 对照需求查一致性，阻塞项修完才放行；</li>
+      <li><b>代码评审</b>：执行后子 agent 对照 Spec 验收标准与 diff 查偏差；</li>
+      <li>全自动模式下评审通过即跳过批准卡直接执行，不打扰用户。</li></ul>
+      <div class="impl">spec/pipeline.py · tools/spec_tool.py</div></div>
+    <div class="card"><h3>✅ 防跑偏四道闸</h3>
+      <ul><li>任务消息内联「不越界」约束 → Spec 锚随时回读 → 代码评审对照 diff → 验收逐条核验（全 ✓ 且无 ✗ 才通过）。</li></ul></div>
+  </div>
+</section>
+
+<section id="multiagent">
+  <h2><span class="no">07</span>多 Agent 协作</h2>
+  <div class="cards">
+    <div class="card"><h3>🤖 spawn_agent 隔离派发</h3>
+      <ul>
+        <li>子 agent 在<b>独立上下文</b>运行：自主探索、执行，中间过程不进主上下文；</li>
+        <li>回传结构化报告（四段契约：结果摘要/修改清单/验证结果/风险遗留），<b>≤1000 字</b>，超限落盘 <code>outputs/</code> 供回取；</li>
+        <li>分工原则：<b>评审用子 agent（隔离），执行用主 agent（可控）</b>。</li>
+      </ul><div class="impl">tools/interactive.py · agent/loop.py</div></div>
+    <div class="card"><h3>🧩 为什么不做并行</h3>
+      <ul><li>v1 评审场景串行足够（父等报告）；并行需调度/合并/权限并发控制，复杂度与收益不匹配——已登记为 v2 增强。诚实的取舍也是设计能力。</li></ul></div>
+  </div>
+</section>
+
+<section id="session">
+  <h2><span class="no">08</span>会话管理 · 工具系统 · 交互体验</h2>
+  <div class="cards">
+    <div class="card"><h3>🗂 会话管理</h3>
+      <ul>
+        <li>用户级集中存储 <code>~/.glaucous/sessions/&lt;project-hash&gt;/</code> + 侧边 JSON 索引（跨目录续接）；</li>
+        <li><code>/sessions /resume /fork /rename /stats</code>；切换保护与自动迁移；自动命名 + 手动重命名。</li>
+      </ul><div class="impl">sessions/ 包 · context/history.py</div></div>
+    <div class="card"><h3>🛠 工具系统（14 个本地工具）</h3>
+      <ul>
+        <li>读写编辑 / 搜索遍历 / shell / ask_user / submit_plan / spawn_agent / memory_save / load_skill / read_spec / todo_write / read_output…</li>
+        <li>统一契约：schema 声明 + 执行层权限校验 + 结果截断落盘。</li>
+      </ul><div class="impl">tools/ 包</div></div>
+    <div class="card"><h3>🎨 交互渲染</h3>
+      <ul>
+        <li>思考过程动态区（ANSI 自管擦除重绘），轮末收缩为一行，<code>/expand</code> 回看；</li>
+        <li>终答 🕊 Markdown 卡片；提问/审批/方案卡支持 ↑↓ 箭头选择（管道模式自动降级数字输入）；</li>
+        <li>天青夏日主题，状态栏模型/模式/占用环。</li>
+      </ul><div class="impl">ui/renderer.py · ui/theme.py · cli.py</div></div>
+  </div>
+</section>
+
+<section id="eval">
+  <h2><span class="no">09</span>评测证据（v1.0 vs v1.1 对照实测）</h2>
+  <p class="lead">自建评测集（判定方法与 SWE-bench 同构：客观测试判据 + pass@1 + 全程留痕），双版本同任务对照实测。</p>
+  <div class="facts">
+    <div class="fact"><b>0 人工干预</b>v1.1 三用例全自动完成（小任务/大任务工程化/高风险重构）</div>
+    <div class="fact"><b>上下文峰值仅 8%</b>最复杂的大任务（多文件 + 依赖安装 + 9 个测试）下</div>
+    <div class="fact"><b>交互应答数 0 vs 1+N</b>v1.1 只需任务文本；v1.0 需预置方案确认 + 审批应答，应答错位即停滞</div>
+    <div class="fact"><b>兜底代差</b>改坏恢复：v1.1 一条 /rollback；v1.0 无回退命令，只能手工 git</div>
+    <div class="fact"><b>RAGAS 元评估</b>AspectCritic 三轮裁判实验如实记录：客观判据为主、judge 捕捉「范围自律」等软维度为辅</div>
+    <div class="fact"><b>336 测试全绿</b>基线守恒贯穿六个里程碑，测试污染事故有专项复盘记录</div>
+  </div>
+</section>
+
+<section id="docs">
+  <h2><span class="no">10</span>文档索引</h2>
+  <table>
+    <tr><th>文档</th><th>内容</th></tr>
+    <tr><td>Glaucous系统详细设计与实现方案.md</td><td>全系统 20 章深度细节（数据结构/算法协议/实现路径/设计决策）</td></tr>
+    <tr><td>Glaucous实现详解（v1.1）.md</td><td>三主线结构 + 设计决策速查（面试底稿）</td></tr>
+    <tr><td>M6评测报告.md</td><td>v1.0 vs v1.1 对照实测 + RAGAS 裁判元评估</td></tr>
+    <tr><td>M6需求合规对照表.md</td><td>赛事要求逐项比对 + 终检清单</td></tr>
+    <tr><td>M6视频脚本与面试材料.md</td><td>2 分钟视频分镜 + 英文 1 分钟介绍 + 高频追问预案</td></tr>
+    <tr><td>编程智能体需求文档v1.1.md / 概要设计说明书v1.1.md / 开发计划表v1.1.md</td><td>规划三件套（FR-35~64 全追溯）</td></tr>
+  </table>
+</section>
+
+</div>
+
+<footer><div class="wrap">
+  Glaucous · 软工推免参赛作品 · 完全自研，无 agent 框架依赖 ·
+  仓库：<a href="https://github.com/Panjiebin13/Glaucous">github.com/Panjiebin13/Glaucous</a>
+  <br>本页面为静态架构介绍，与仓库内《Glaucous系统详细设计与实现方案》同源；生成日期 2026-09-01。
+</div></footer>
+
+</body>
+</html>
