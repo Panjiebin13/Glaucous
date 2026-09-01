@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>Glaucous · 高自主与长任务的 2+3 基座</title>
+<style>
+  :root {
+    --celadon: #4A90A4;
+    --celadon-dark: #2C5F6E;
+    --celadon-deep: #1F4652;
+    --ink: #22343B;
+    --soft: #5A6B72;
+    --line: #D7E8EC;
+    --green: #2E8B57;
+    --green-soft: #E4F3EA;
+    --amber: #C07A1E;
+    --amber-soft: #FBF0DC;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+    background: linear-gradient(135deg, #EDF6F8 0%, #DCEEF2 100%);
+    color: var(--ink);
+    min-height: 100vh;
+    display: flex; justify-content: center; padding: 30px 24px;
+  }
+  .stage { width: 1600px; max-width: 100%; }
+
+  /* ---------- 标题 ---------- */
+  header { text-align: center; margin-bottom: 20px; }
+  header h1 { font-size: 40px; color: var(--celadon-dark); letter-spacing: 3px; }
+  header .sub { margin-top: 8px; font-size: 19px; color: var(--soft); }
+  header .sub b { background: var(--celadon-dark); color: #fff; padding: 3px 16px; border-radius: 999px; font-weight: 600; }
+
+  /* ---------- 双维度布局 ---------- */
+  .dims { display: flex; gap: 20px; align-items: stretch; }
+  .dim { flex: 1; display: flex; flex-direction: column; gap: 14px; }
+  .dim-head {
+    border-radius: 12px; padding: 10px 18px; color: #fff;
+    display: flex; align-items: baseline; gap: 12px;
+  }
+  .dim-head.long  { background: linear-gradient(90deg, var(--celadon-dark), var(--celadon)); }
+  .dim-head.auto  { background: linear-gradient(90deg, #2F6B4F, #3E9B6E); }
+  .dim-head b { font-size: 22px; letter-spacing: 2px; }
+  .dim-head span { font-size: 15px; opacity: .92; }
+
+  /* ---------- 基座卡片 ---------- */
+  .base {
+    background: #fff; border: 1px solid var(--line); border-radius: 14px;
+    padding: 14px 18px; flex: 1;
+    box-shadow: 0 6px 20px rgba(44,95,110,.10);
+    display: flex; flex-direction: column;
+  }
+  .base h3 { display: flex; align-items: center; gap: 10px; font-size: 19px; color: var(--celadon-dark); }
+  .base h3 .no {
+    width: 26px; height: 26px; border-radius: 8px; background: var(--celadon);
+    color: #fff; font-size: 14px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;
+  }
+  .dim.auto .base h3 { color: #2F6B4F; }
+  .dim.auto .base h3 .no { background: var(--green); }
+  .base .role { font-size: 13.5px; color: var(--soft); margin: 3px 0 8px 36px; }
+  .base ul { list-style: none; margin-left: 36px; }
+  .base li { font-size: 14.5px; line-height: 1.55; padding: 3px 0 3px 16px; position: relative; }
+  .base li::before { content: "▸"; position: absolute; left: 0; color: var(--celadon); }
+  .dim.auto .base li::before { color: var(--green); }
+  .base li b { color: var(--ink); }
+  .base .fact {
+    margin: 8px 0 0 36px; font-size: 13px; color: var(--celadon-dark);
+    background: var(--green-soft); border-radius: 8px; padding: 5px 10px; align-self: flex-start;
+  }
+  .dim.long .base .fact { background: #E8F4F7; }
+
+  /* ---------- 底部总纲 ---------- */
+  .creed {
+    margin-top: 18px; background: var(--celadon-deep); color: #fff;
+    border-radius: 12px; padding: 14px 22px; text-align: center; font-size: 17px; letter-spacing: 1px;
+  }
+  .creed b { color: #A8DCE8; }
+  footer { text-align: center; margin-top: 12px; font-size: 13.5px; color: #8AA0A8; }
+</style>
+</head>
+<body>
+<div class="stage">
+
+  <header>
+    <h1>高自主 × 长任务：2+3 基座体系</h1>
+    <div class="sub">长任务三座解决「跑得久」，高自主两座解决「敢自动」——<b>装得下 · 省着用 · 不跑偏 · 敢放 · 能收</b></div>
+  </header>
+
+  <div class="dims">
+
+    <!-- 维度一：长任务 -->
+    <div class="dim long">
+      <div class="dim-head long"><b>维度一 · 长任务跑得动</b><span>装得下 → 省着用 → 不跑偏</span></div>
+
+      <div class="base">
+        <h3><span class="no">1</span>上下文工程：三级压缩 + 锚机制</h3>
+        <div class="role">容量不爆、目标不丢——长任务的物理保障</div>
+        <ul>
+          <li><b>L1 本地裁剪</b>（&gt;70%）：旧轮次工具结果由执行记账派生成一行摘要，零模型开销、无幻觉；锚行豁免保留</li>
+          <li><b>L2 模型摘要</b>（&gt;85%）：早期历史压成 500 字摘要，并<b>从磁盘重建锚段</b>拼入——压缩永不丢目标</li>
+          <li><b>预算优雅终止</b>：压缩后仍超限则体面收尾，<code>--resume</code> 无损续接（输出侧另有 L0：超长输出截断落盘，可回取）</li>
+          <li><b>锚机制</b>：方案/Spec 全文落盘不常驻，历史里只留「路径+目标+回读入口」，按需 read_plan / read_spec 取回</li>
+        </ul>
+        <div class="fact">实测：四目标大任务上下文峰值占用仅 8%（128K 窗口）</div>
+      </div>
+
+      <div class="base">
+        <h3><span class="no">2</span>子 Agent 上下文隔离</h3>
+        <div class="role">重活在独立上下文里干——容量省着用，评审自动化</div>
+        <ul>
+          <li>独立 History / system prompt / 工具集（去除 spawn_agent 防嵌套），中间过程不进主上下文</li>
+          <li>回传四段式结构化报告，<b>≤1000 字</b>，超限落盘可回取——父上下文只增一页报告</li>
+          <li>分工：<b>评审用子 agent（隔离），执行用主 agent（可控）</b>——Spec 评审、代码评审、验收核验全自动</li>
+        </ul>
+        <div class="fact">效果：评审几十轮往返，主上下文增量仅报告字数级</div>
+      </div>
+
+      <div class="base">
+        <h3><span class="no">3</span>Spec 任务分解</h3>
+        <div class="role">方向不偏、中断能续——长任务的组织保障</div>
+        <ul>
+          <li>大任务澄清后成书面契约：任务清单 + 验收标准，<b>逐任务受管分发</b>（三段式消息：约束摘录 + 子任务 + 不越界）</li>
+          <li><b>防偏移四道闸</b>：任务内联约束 → Spec 锚随时回读 → 代码评审对照 diff 查越界 → 验收逐条核验</li>
+          <li>状态即文档：勾选写回 + frontmatter 落盘，中断后 <code>/spec</code> 断点续跑、<code>--resume</code> 续会话</li>
+        </ul>
+        <div class="fact">评测实证：v1.0 组多余输入触发范围外重构；v1.1 全程零越界</div>
+      </div>
+    </div>
+
+    <!-- 维度二：高自主 -->
+    <div class="dim auto">
+      <div class="dim-head auto"><b>维度二 · 高自主</b><span>敢放 → 能收</span></div>
+
+      <div class="base">
+        <h3><span class="no">4</span>权限矩阵 + 默认 Build</h3>
+        <div class="role">敢放，且默认就放——自主的开关与刹车</div>
+        <ul>
+          <li>核心判据「<b>有无兜底</b>」：Git 工作区内写入免审（快照可回退）；兜不住的坚决拦</li>
+          <li><b>三道恒定守卫</b>：<code>.glaucous/</code> 写、区外写、<code>push --force</code>——任何策略不可豁免</li>
+          <li>启动即 Build + auto-approve：任务一行下达，执行期零审批弹窗；全部决策写审计日志</li>
+        </ul>
+        <div class="fact">实测：三用例全程 0 人工干预完成（含多文件大任务）</div>
+      </div>
+
+      <div class="base">
+        <h3><span class="no">5</span>Checkpoint 随时回退</h3>
+        <div class="role">能收——改坏了一条命令还原，自主的安全底座</div>
+        <ul>
+          <li>每轮任务入口自动打 Git 快照（临时索引五步法，连新增文件也捕获），保留最近 50 个</li>
+          <li><code>/rollback</code>：变更清单确认卡（修改/删除/新增三态）→ 文件精确还原；审批「拒绝」可联动回退</li>
+          <li>快照是权限放宽的前提：<b>正因为回得去，才敢放开手</b></li>
+        </ul>
+        <div class="fact">对照实证：改坏恢复——v1.1 一条 /rollback；v1.0 无回退手段，只能手工 git</div>
+      </div>
+    </div>
+
+  </div>
+
+  <div class="creed">
+    长任务三座：<b>压缩+锚</b> 让它装得下 · <b>子 agent 隔离</b> 让它省着用 · <b>Spec 分解</b> 让它不跑偏
+    &nbsp;&nbsp;|&nbsp;&nbsp; 高自主两座：<b>权限矩阵</b> 让它敢放 · <b>checkpoint</b> 让它输得起
+  </div>
+
+  <footer>Glaucous · 完全自研（0 框架依赖）· 336 测试全绿 · 评测数据见《M6评测报告》</footer>
+
+</div>
+</body>
+</html>
