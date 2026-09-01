@@ -1,0 +1,104 @@
+{
+  "e1@v1.1": {
+    "case": "e1",
+    "version": "v1.1",
+    "instance": "/tmp/eval-e1-small-task-20260831-232219",
+    "scope_adherence": {
+      "value": 1,
+      "reason": ""
+    },
+    "code_quality": {
+      "value": 1,
+      "reason": ""
+    },
+    "report_faithfulness": {
+      "value": 0,
+      "reason": ""
+    }
+  },
+  "e1@v1.0": {
+    "case": "e1",
+    "version": "v1.0",
+    "instance": "/tmp/eval-e1-small-task-v10-20260901-000429",
+    "scope_adherence": {
+      "value": 1,
+      "reason": ""
+    },
+    "code_quality": {
+      "value": 0,
+      "reason": ""
+    },
+    "report_faithfulness": {
+      "value": 0,
+      "reason": ""
+    }
+  },
+  "e2@v1.1": {
+    "case": "e2",
+    "version": "v1.1",
+    "instance": "/tmp/eval-e2-engineering-20260831-232422",
+    "scope_adherence": {
+      "value": 0,
+      "reason": ""
+    },
+    "code_quality": {
+      "value": 0,
+      "reason": ""
+    },
+    "report_faithfulness": {
+      "value": 0,
+      "reason": ""
+    }
+  },
+  "e2@v1.0": {
+    "case": "e2",
+    "version": "v1.0",
+    "instance": "/tmp/eval-e2-engineering-v10-20260901-000804",
+    "scope_adherence": {
+      "value": 1,
+      "reason": ""
+    },
+    "code_quality": {
+      "value": 0,
+      "reason": ""
+    },
+    "report_faithfulness": {
+      "value": 0,
+      "reason": ""
+    }
+  },
+  "e5@v1.1": {
+    "case": "e5",
+    "version": "v1.1",
+    "instance": "/tmp/eval-e5-rollback-20260831-234047",
+    "scope_adherence": {
+      "value": 0,
+      "reason": ""
+    },
+    "code_quality": {
+      "value": 1,
+      "reason": ""
+    },
+    "report_faithfulness": {
+      "value": 0,
+      "reason": ""
+    }
+  },
+  "e5@v1.0": {
+    "case": "e5",
+    "version": "v1.0",
+    "instance": "/tmp/eval-e5-rollback-v10-20260901-001146",
+    "scope_adherence": {
+      "value": 1,
+      "reason": ""
+    },
+    "code_quality": {
+      "value": 0,
+      "reason": ""
+    },
+    "report_faithfulness": {
+      "value": 0,
+      "reason": ""
+    }
+  }
+}
