@@ -32,22 +32,23 @@
   header .sub { margin-top: 8px; font-size: 19px; color: var(--soft); }
   header .sub b { background: var(--celadon-dark); color: #fff; padding: 3px 16px; border-radius: 999px; font-weight: 600; }
 
-  /* ---------- 双维度布局 ---------- */
-  .dims { display: flex; gap: 20px; align-items: stretch; }
-  .dim { flex: 1; display: flex; flex-direction: column; gap: 14px; }
+  /* ---------- 双维度布局（上下两行，行内卡片等宽）---------- */
+  .dims { display: flex; flex-direction: column; gap: 16px; }
+  .dim { display: flex; flex-direction: column; gap: 10px; }
   .dim-head {
-    border-radius: 12px; padding: 10px 18px; color: #fff;
+    border-radius: 12px; padding: 9px 18px; color: #fff;
     display: flex; align-items: baseline; gap: 12px;
   }
   .dim-head.long  { background: linear-gradient(90deg, var(--celadon-dark), var(--celadon)); }
   .dim-head.auto  { background: linear-gradient(90deg, #2F6B4F, #3E9B6E); }
-  .dim-head b { font-size: 22px; letter-spacing: 2px; }
+  .dim-head b { font-size: 21px; letter-spacing: 2px; }
   .dim-head span { font-size: 15px; opacity: .92; }
+  .dim-cards { display: flex; gap: 14px; align-items: stretch; }
 
   /* ---------- 基座卡片 ---------- */
   .base {
     background: #fff; border: 1px solid var(--line); border-radius: 14px;
-    padding: 14px 18px; flex: 1;
+    padding: 13px 16px; flex: 1;
     box-shadow: 0 6px 20px rgba(44,95,110,.10);
     display: flex; flex-direction: column;
   }
@@ -89,9 +90,10 @@
 
   <div class="dims">
 
-    <!-- 维度一：长任务 -->
+    <!-- 维度一：长任务（3 卡并排） -->
     <div class="dim long">
       <div class="dim-head long"><b>维度一 · 长任务跑得动</b><span>装得下 → 省着用 → 不跑偏</span></div>
+      <div class="dim-cards">
 
       <div class="base">
         <h3><span class="no">1</span>上下文工程：三级压缩 + 锚机制</h3>
@@ -126,17 +128,21 @@
         </ul>
         <div class="fact">评测实证：v1.0 组多余输入触发范围外重构；v1.1 全程零越界</div>
       </div>
+
+      </div>
     </div>
 
-    <!-- 维度二：高自主 -->
+    <!-- 维度二：高自主（2 卡并排） -->
     <div class="dim auto">
       <div class="dim-head auto"><b>维度二 · 高自主</b><span>敢放 → 能收</span></div>
+      <div class="dim-cards">
 
       <div class="base">
         <h3><span class="no">4</span>权限矩阵 + 默认 Build</h3>
         <div class="role">敢放，且默认就放——自主的开关与刹车</div>
         <ul>
           <li>核心判据「<b>有无兜底</b>」：Git 工作区内写入免审（快照可回退）；兜不住的坚决拦</li>
+          <li>bash 命令经分类器动态定级：复合命令拆段取最坏、危险模式降级/升级，宁多问不漏放</li>
           <li><b>三道恒定守卫</b>：<code>.glaucous/</code> 写、区外写、<code>push --force</code>——任何策略不可豁免</li>
           <li>启动即 Build + auto-approve：任务一行下达，执行期零审批弹窗；全部决策写审计日志</li>
         </ul>
@@ -149,9 +155,12 @@
         <ul>
           <li>每轮任务入口自动打 Git 快照（临时索引五步法，连新增文件也捕获），保留最近 50 个</li>
           <li><code>/rollback</code>：变更清单确认卡（修改/删除/新增三态）→ 文件精确还原；审批「拒绝」可联动回退</li>
+          <li>可选「同时回退对话上下文」：截断点锚配对校验，不匹配宁只回退文件也不静默错位</li>
           <li>快照是权限放宽的前提：<b>正因为回得去，才敢放开手</b></li>
         </ul>
         <div class="fact">对照实证：改坏恢复——v1.1 一条 /rollback；v1.0 无回退手段，只能手工 git</div>
+      </div>
+
       </div>
     </div>
 
