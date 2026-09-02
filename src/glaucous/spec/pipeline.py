@@ -70,16 +70,17 @@ class SpecPipeline:
         async def run_turn(message: str) -> str:
             if ctx.loop is None:
                 raise SpecStateError("主循环未装配，无法执行 Spec 流程")
-            from ..cli import run_managed_turn
+            from ..ui.callbacks import run_managed_turn
 
             # R1/R3：repl 同款轮壳（思考区收缩 + 终答 md 卡片）
+            # v1.1 评审重构：自 cli 迁入 ui.callbacks——spec 子系统不再反向依赖入口模块 cli
             return await run_managed_turn(ctx, message, label=message[:40])
 
         async def run_review(task: str, context: str) -> tuple[str, dict[str, Any]]:
             runner = getattr(ctx, "subagent_runner", None)
             if runner is None:
                 return "", {"ok": False}
-            from ..cli import thinking_enter, thinking_exit
+            from ..ui.callbacks import thinking_enter, thinking_exit
 
             # R5：子评审区间段自有干净思考区生命周期（防旧计数/正文尾泄漏）
             thinking_enter(ctx)
@@ -102,7 +103,7 @@ class SpecPipeline:
             finally:
                 thinking_exit(ctx)
 
-        from ..cli import make_ask_callback
+        from ..ui.callbacks import make_ask_callback
 
         sync_ask = make_ask_callback(ctx)
 

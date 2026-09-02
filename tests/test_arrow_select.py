@@ -72,7 +72,8 @@ class TestRedrawProtocol:
         from rich.console import Console
 
         buf = io.StringIO()
-        monkeypatch.setattr(cli, "console", Console(file=buf, width=80))
+        # 拆分重构：select_with_arrows 迁至 ui.interact，console 补丁须打在实现模块
+        monkeypatch.setattr("glaucous.ui.interact.console", Console(file=buf, width=80))
         assert cli.select_with_arrows("请选择：", OPTIONS, read_key=keys("down", "enter")) == 1
         out = buf.getvalue()
         assert out.count("请选择：") == 2      # 初绘 + 一次重绘，不叠加
@@ -86,7 +87,7 @@ class TestRedrawProtocol:
         from rich.console import Console
 
         buf = io.StringIO()
-        monkeypatch.setattr(cli, "console", Console(file=buf, width=20))
+        monkeypatch.setattr("glaucous.ui.interact.console", Console(file=buf, width=20))
         long_option = "同" * 30
         assert cli.select_with_arrows("请选择：", [long_option], read_key=keys("enter")) == 0
         out = buf.getvalue()

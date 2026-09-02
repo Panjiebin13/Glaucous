@@ -374,7 +374,8 @@ class TestThinkingRedrawProtocol:
         from rich.console import Console
 
         buf = io.StringIO()
-        monkeypatch.setattr(cli, "console", Console(file=buf, width=100, height=50))
+        # 拆分重构：ThinkingView 迁至 ui.thinking，console 补丁须打在实现模块
+        monkeypatch.setattr("glaucous.ui.thinking.console", Console(file=buf, width=100, height=50))
         return buf
 
     def test_add_draws_block_and_counts(self, monkeypatch) -> None:

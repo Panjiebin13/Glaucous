@@ -49,6 +49,15 @@ DANGEROUS_PIPE_PATTERNS: tuple[str, ...] = ("| sh", "|sh", "| bash", "|bash", "|
 INPLACE_MARKERS: tuple[str, ...] = ("-i", "-i.bak")
 DELETE_MARKERS: tuple[str, ...] = ("-delete", "-exec rm", "-exec rm -rf")
 
+# 写型非白名单命令：目标以参数形式给出（非重定向）——目标指向区外/受保护
+# → DANGEROUS（「区外写恒拦」承诺与首词无关，e8 实测修复 2026-09-02）。
+# cp/ln 等目标为末参数（源在前）；tee/truncate/shred 全部参数均为写目标。
+WRITE_ARG_COMMANDS: frozenset[str] = frozenset(
+    {"tee", "truncate", "shred", "cp", "ln", "install", "rsync", "scp"}
+)
+# 目标取末参数的命令（源 → 目标顺序）
+WRITE_ARG_LAST_COMMANDS: frozenset[str] = frozenset({"cp", "ln", "install", "rsync", "scp"})
+
 
 class CommandClassifier:
     """命令定级器：纯函数式，注入 workspace 判定命令内路径区外。"""
@@ -62,10 +71,33 @@ class CommandClassifier:
         先拆分复合命令（; / && / 管道 |），对每段递归定级取最坏风险——
         非首段危险命令（`echo a; rm -rf /`、`x && sudo rm -rf /`、`echo foo | rm -rf /`）
         不可因白名单首词被整体放行（B2r1/Blocker-1 修复）。
+
+        命令替换下限（评审 BLOCKER 修复 2026-09-01）：SAFE 定级不可遮蔽
+        引号外的 $( )/反引号结构——命令替换会在子 shell 中展开执行任意
+        嵌套命令，白名单首词（echo/ls 等）不可代表替换体的风险；命中即
+        抬升 WRITE 走审批。只抬升 SAFE（不稀释更高定级）：
+        `echo $(curl x | sh)` 仍经管道分支判 DANGEROUS。
+
+        重定向区外写下限（e8 实测修复 2026-09-02）：auto-approve 仅对
+        DANGEROUS 恒拦，「区外写恒拦」依赖本分类器把区外/受保护写目标
+        判为 DANGEROUS——但非白名单首词（如 printf）走保守升级 WRITE 分支
+        时未检查重定向目标指向，`printf 'x' >> ~/.bashrc` 曾被放行。
+        故顶层对整串命令做引号感知的重定向目标扫描，与首词无关：
+        任一重定向写目标指向区外/受保护 → 整体 DANGEROUS。
         """
         stripped = command.strip()
         if not stripped:
             return Risk.WRITE, "空命令按保守升级处理"
+        risk, note = self._classify_core(stripped)
+        if risk == Risk.SAFE and _has_command_substitution(stripped):
+            return Risk.WRITE, "命令含命令替换（$( )/反引号），保守升级为写操作审批"
+        if risk != Risk.DANGEROUS:
+            target = self._redirect_external_write(stripped)
+            if target is not None:
+                return Risk.DANGEROUS, f"重定向写目标指向 {target}"
+        return risk, note
+
+    def _classify_core(self, stripped: str) -> tuple[Risk, str]:
         segments = _split_segments(stripped)
         if len(segments) > 1:
             worst: Risk | None = None
@@ -132,6 +164,11 @@ class CommandClassifier:
         if first_word in SAFE_COMMANDS:
             return self._classify_safe_command(first_word, stripped)
 
+        # 7.5) 写型非白名单命令：目标参数指向区外/受保护 → DANGEROUS
+        # （e8 实测修复 2026-09-02：`tee ~/.bashrc` 曾被保守升级 WRITE 放行）
+        if first_word in WRITE_ARG_COMMANDS:
+            return self._classify_write_arg_command(first_word, stripped)
+
         # 8) 保守升级：无法判定的命令按 WRITE 走审批（宁多问不漏放）
         return Risk.WRITE, f"无法判定命令 {first_word}，保守升级为写操作审批"
 
@@ -178,6 +215,12 @@ class CommandClassifier:
             for marker in INPLACE_MARKERS + DELETE_MARKERS:
                 if marker in command:
                     return Risk.WRITE, f"{first} 含原地编辑/删除变体（写操作）"
+        # find -exec/-execdir（评审修复 2026-09-01）：token 级匹配，任一命中即按
+        # 写定级——-exec 后接任意命令（含 bash/sh/python 解释器链）在子进程执行，
+        # 此前 DELETE_MARKERS 仅匹配字面 `-exec rm`，漏过 `-execdir bash -c`
+        if first == "find":
+            if any(tok in ("-exec", "-execdir") for tok in command.split()):
+                return Risk.WRITE, "find 含 -exec/-execdir（执行命令，写操作）"
         # 读文件类：路径指向区外 → WRITE（读区外需审批，FR-13）
         if first in ("cat", "head", "tail", "grep", "rg", "sed", "awk"):
             for token in self._tokens_after(command):
@@ -272,6 +315,35 @@ class CommandClassifier:
             if risk != Risk.SAFE:
                 return risk, f"mv 路径指向 {token}"
         return Risk.WRITE, "mv 区内移动（写操作）"
+
+    def _classify_write_arg_command(self, first: str, command: str) -> tuple[Risk, str]:
+        """写型非白名单命令（tee/cp 等）：写目标参数指向区外/受保护 → DANGEROUS。
+
+        cp/ln 等源→目标顺序取末参数；tee/truncate/shred 全部非选项参数均为写
+        目标。目标全在区内 → WRITE（与重定向区内写同级别，git 兜底可回退）。
+        """
+        tokens = [t for t in command.split()[1:] if not t.startswith("-")]
+        if first in WRITE_ARG_LAST_COMMANDS:
+            tokens = tokens[-1:]
+        for token in tokens:
+            risk = self._path_risk(token, writing=True)
+            if risk == Risk.DANGEROUS:
+                return risk, f"{first} 写目标指向 {token}"
+        return Risk.WRITE, f"{first} 写操作（目标区内）"
+
+    def _redirect_external_write(self, command: str) -> str | None:
+        """扫描整串命令（引号感知），返回首个指向区外/受保护的重定向写目标。
+
+        与首词无关的兑底防线（e8 实测修复）：重定向是 shell 普适写机制，
+        白名单/保守升级/解释器分支的判定都不应掩盖 `>> ~/.bashrc` 的区外
+        写语义。引号内的 `>` 为字面量不误报；/dev/null 惯用法豁免。
+        """
+        for target in _scan_redirect_targets(command):
+            if target.strip("'\"") == "/dev/null":
+                continue
+            if self._path_risk(target, writing=True) == Risk.DANGEROUS:
+                return target.strip("'\"")
+        return None
 
     # -- 辅助 --------------------------------------------------------------
 
@@ -420,6 +492,108 @@ def _strip_quoted(command: str) -> str:
             continue
         out.append(ch)
     return "".join(out)
+
+
+def _has_command_substitution(command: str) -> bool:
+    r"""检测是否含会被 shell 展开的命令替换结构（$( ) 或反引号）。
+
+    引号语义（评审 BLOCKER 修复 2026-09-01）：
+    - 单引号内为字面量，不展开 → 豁免（`echo '$(x)'` 不误报）；
+    - 双引号内 $( )/反引号仍会展开 → 不豁免（`echo "$(x)"` 命中）；
+    - 转义（\$ 与 \`）为字面量 → 豁免。
+    命中即由调用方将 SAFE 抬升 WRITE（宁多问不漏放，概设 §5.5）。
+    """
+    quote: str | None = None
+    escaped = False
+    i = 0
+    n = len(command)
+    while i < n:
+        ch = command[i]
+        if escaped:
+            escaped = False
+            i += 1
+            continue
+        if ch == "\\" and quote != "'":
+            escaped = True
+            i += 1
+            continue
+        if quote:
+            if ch == quote:
+                quote = None
+            elif quote == '"':
+                # 双引号内命令替换仍展开，需检测
+                if ch == "`":
+                    return True
+                if ch == "$" and i + 1 < n and command[i + 1] == "(":
+                    return True
+            i += 1
+            continue
+        if ch in ("'", '"'):
+            quote = ch
+            i += 1
+            continue
+        if ch == "`":
+            return True
+        if ch == "$" and i + 1 < n and command[i + 1] == "(":
+            return True
+        i += 1
+    return False
+
+
+def _scan_redirect_targets(command: str) -> list[str]:
+    """引号感知扫描：收集命令串中所有重定向写目标（含原始引号）。
+
+    与 _collect_redirect_targets 的区别：后者用正则扫描（不引号感知，
+    仅供白名单命令段内使用）；本函数逐字符跟踪引号状态，引号内的 `>`
+    为字面量不收集——供 classify 顶层兑底使用（e8 实测修复 2026-09-02）。
+    支持 `> t` / `>>t` / `2> t` 等写法；`>&fd` 的 fd 目标跳过。
+    """
+    targets: list[str] = []
+    quote: str | None = None
+    escaped = False
+    i = 0
+    n = len(command)
+    while i < n:
+        ch = command[i]
+        if escaped:
+            escaped = False
+            i += 1
+            continue
+        if ch == "\\" and quote != "'":
+            escaped = True
+            i += 1
+            continue
+        if quote:
+            if ch == quote:
+                quote = None
+            i += 1
+            continue
+        if ch in ("'", '"'):
+            quote = ch
+            i += 1
+            continue
+        if ch == ">":
+            # 跳过 fd 前缀数字（已在主循环当作普通字符略过，无妨——目标
+            # 收集只关心 > 后的 token）；>> 双字符
+            if i + 1 < n and command[i + 1] == ">":
+                i += 1
+            i += 1
+            # 跳过空白
+            while i < n and command[i] in " \t":
+                i += 1
+            if i >= n:
+                break
+            # 读目标 token（允许内嵌引号，末尾统一剥离）
+            buf: list[str] = []
+            while i < n and command[i] not in " \t;|&":
+                buf.append(command[i])
+                i += 1
+            token = "".join(buf)
+            if token and not token.startswith("&"):  # >&fd 的 fd 目标跳过
+                targets.append(token)
+            continue
+        i += 1
+    return targets
 
 
 def _split_pipes(command: str) -> list[str]:
