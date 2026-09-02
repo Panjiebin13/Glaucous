@@ -99,7 +99,7 @@ def render_banner(model_name: str, mode: str) -> None:
     glaucous.sub（海盐青斜体），操作提示走 glaucous.muted（晴空灰）。
     Banner 为启动快照：/model 切换后不刷新（数据源 ctx.current_model，S8 口径）。
     """
-    table = make_card(":cloud: Glaucous · coding agent（M3 体验与扩展）")
+    table = make_card(":cloud: Glaucous · coding agent（v1.1 正式版）")
     table.add_row("[glaucous.sub]雨过天青，海鸥滑翔，代码自有清凉[/]")
     table.add_row("[glaucous.muted]输入任务开始对话，/help 查看命令，/exit 退出。默认 Build 自动放行（DANGEROUS 仍单独确认），/plan 切只读研究。[/]")
     table.add_row(f"[glaucous.muted]当前模型 {escape(model_name)} · 模式 {escape(mode)}[/]")
