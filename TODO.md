@@ -1,6 +1,10 @@
 # Glaucous TODO
 
 > 按开发计划表维护每日进度勾选（评委可见的开发过程素材）。
+>
+> **最后更新：2026-09-02（外部多维评审复评与修复批次，见下方「评审复评与修复批次（9/2）」节）**
+> 当前测试基线：**359 passed**（WSL + Miniconda glaucous 环境，`python -m pytest -q`）；初评 336 → 分类器修复 +12 → 重定向区外写修复 +11
+> 评测基线：8 用例（e1~e8）已建成并自验 13/13；全自动用例 e1/e2/e3/e4/e8 已双版本实跑（详见 docs/M6评测报告.md §十）
 
 ## M0 原型闭环（8/27–8/28）
 
@@ -77,10 +81,10 @@
 #### 代码评审建议项（r1，见 docs/reviews/202608290030-m3-day5-code-review-r1.md）
 
 - [ ] S2 状态栏 bottom_toolbar 为纯文本：无占用条三档变色与档位附注、Build 徽标未附策略（prompt_toolkit 侧样式需另行接线）
-- [ ] S4 pyproject package-data 用 assets/skills/*/SKILL.md，改 ** 防嵌套目录时 wheel 漏装（当前单层等价）
-- [ ] S5 /init README 识别仅枚举 3 个固定文件名，未覆盖 spec 的 README* 通配
+- [ ] S4 pyproject package-data 用 assets/skills/*/SKILL.md，改 ** 防嵌套目录时 wheel 漏装（当前单层等价）——**9/2 复核仍未改**：pyproject 仍为单层 `assets/skills/*/SKILL.md`；因当前无嵌套目录故无实际漏装，作为预防项继续挂账（不销）
+- [ ] S5 /init README 识别仅枚举 3 个固定文件名，未覆盖 spec 的 README* 通配（**9/2 复核仍未偿还**：init_draft.py 仍为 `("README.md", "README.txt", "README")` 枚举）
 - [ ] S6 init_draft.scan_workspace 相对路径在 Windows 下分隔符混杂，建议统一 POSIX 风格
-- [ ] S7 Banner 缺「模式占位」（仅显示模型名，spec §4.2 字面要求模型名与模式占位）
+- [x] S7 Banner 缺「模式占位」（仅显示模型名，spec §4.2 字面要求模型名与模式占位）——**已完成（9/2 复核销账）**：cli.render_banner 第三行现为「当前模型 {model_name} · 模式 {mode}」，模型名与模式占位均已呈现
 - [x] S1/S3/S8 现状确认（r2 说明）：S1 load_config 抛 RegistryError 由 cli 双捕获，行为等价；S3 budget critical 维持三档状态行形态（升警示卡会与状态行重复，登记本项待 M4 视觉验收时再定）；S8 ReplContext loop/pipeline 可空与 stream_state 字段为构造顺序必需的等价实现（r2 已接受）
 
 #### 代码评审建议项（r2，见 docs/reviews/202608290021-m3-day5-code-review-r2.md）
@@ -90,11 +94,11 @@
 
 #### 合并评审建议项（r3，见 docs/reviews/202608311000-plan-m3-day5-experience-extensions-code-review-r3-20260829-1700.md；B1/B2 已修复关闭，r4 聚焦复审通过）
 
-- [ ] r3-S1 /help 与 PT 补全未收录 /view：HELP_LINES / SLASH_COMMANDS 增补（commands.py + cli.py）
-- [ ] r3-S2 /exit 双路径死代码与告别文案分叉：清理 commands._cmd_exit 死分支或恢复 🌅 文案并同步 spec §4.3
-- [ ] r3-S3 rich 依赖上限丢失：恢复 rich>=13.7,<14 或修订 spec §4.7 并登记
-- [ ] r3-S5 Banner 无模型名/模式占位（r1 S7 合并后偏离扩大）：Banner 第三行接 ctx.current_model 与模式段，M4 视觉验收处理
-- [ ] r3-S4 M3-UI 已登记修复项现状未变（B-01/S-01/S-02）：并入上方 3.2r 待办随 M4 偿还
+- [x] r3-S1 /help 与 PT 补全未收录 /view：HELP_LINES / SLASH_COMMANDS 增补（commands.py + cli.py）——**已完成（9/2 复核销账）**：ui/input.py `SLASH_COMMANDS` 已含 `/view`（共 21 命令），commands.py `COMMAND_META` 为单一数据源并已收录 `/view`、`/expand`（HELP_LINES 由它拼装）
+- [x] r3-S2 /exit 双路径死代码与告别文案分叉：清理 commands._cmd_exit 死分支或恢复 🌅 文案并同步 spec §4.3——**已完成（9/2 复核销账，取「清理死分支」口径）**：commands.py 已注明「附加项 C：/exit、/quit 分派分支已删除（cli repl 内联拦截为唯一路径）」，HELP_LINES 条目经 COMMAND_META 保留
+- [x] r3-S3 rich 依赖上限丢失：恢复 rich>=13.7,<14 或修订 spec §4.7 并登记——**已完成（9/2 复核销账）**：pyproject.toml 现为 `rich>=13.7,<14`（含「此前漏声明，干净环境启动即崩」教训注释）
+- [x] r3-S5 Banner 无模型名/模式占位（r1 S7 合并后偏离扩大）：Banner 第三行接 ctx.current_model 与模式段，M4 视觉验收处理——**已完成**（同 r1-S7，render_banner 已呈现模型名 + 模式）
+- [ ] r3-S4 M3-UI 已登记修复项现状未变（B-01/S-01/S-02）：并入上方 3.2r 待办随 M4 偿还——**9/2 复核部分完成**：B-01 已修（见 3.2r），S-01/S-02 仍未偿还
 
 ### Day 5 / M3 CLI 主题渲染（8/31）
 
@@ -105,11 +109,15 @@
 - [x] 3.3i prompt_toolkit 输入层接入：theme.py `PT_STYLE`（与 rich THEME 同一组色板常量派生、类名即语义名，带点号类名 `class:glaucous.title` 实测可解析，色板单一出口延伸到输入层）+ cli.py 主输入 `PromptSession`（`prompt_async` 接 asyncio 循环、↑↓ 历史 + Ctrl+R 搜索、`FileHistory` 持久化 `.glaucous/input_history` 跨会话可用、打不开文件退回内存历史）；`prompt_symbol` 返回值改 prompt_toolkit HTML（提示符随输入行归 PT 渲染，rich markup 方括号会被 PT 字面打印），拆 `prompt_mode()` 供非交互分支拼纯文本，模型名晴空灰弱化并列模式后（`🌊 plan · deepseek-v4-flash > `，读 `config.profile.model`，3.4 /model 后动态跟随）；非 tty（管道/重定向）回退 `console.input`，TODO 1.8 cp936 净化路径不变；顺手修 B-04：三处 `console.print(file=sys.stderr)` 传 rich 不支持的形参，「配置错误/本轮执行失败/工作区不存在」兜底路径触发即 TypeError 自崩（配置缺失实测复现），去掉 file 形参走主题 Console。验证：65 用例全绿 + 管道/pty 双端到端（pty 实测 PT 路径模型名/天青加粗语义色命中、/exit 契约、退出码 0）
 - [x] 3.3i2 输入区布局收敛：删独立模式行与 ❯ 前缀，模式段并入输入行前缀（tty 走 prompt_toolkit HTML `<glaucous.title>🌊 plan > </glaucous.title>` 天青加粗，管道回退拼纯文本 `🌊 plan > `，build·每次审批/auto 随 state 每轮动态重算）；模型/ctx 行顶格（去 2 空格缩进）；对话末尾 budget 占用条渲染删除，占用信息并入头部模型行（`deepseek-v4-flash  ○ 48k/128k tokens`——ctx_ring 圆环三档变色保留承载档位、百分比数字删除、token 用量接圆环后），render_prompt_header 签名 percent → `BudgetReport`（build_report 直传，单一数据源）。验证：68 用例全绿（65 基线 + tests/test_compression_event.py 压缩意象事件 3 用例）+ 管道/pty 双端到端（管道回退 `🌊 plan > ` 前缀 + 退出码 0；pty 实测前缀天青加粗 ANSI `0;38;5;73;1m`、无 `❯`、/exit 告别正常）
 - [x] 3.3v /view 文件渲染（3.3 斜杠命令首个落地）——`/view <路径>` 按后缀注册表（`_VIEW_RENDERERS`，27 后缀 → 四类）分发渲染：md→方案卡式 Markdown 卡片 / 代码→pygments 语法高亮（rich Syntax，不进卡片容器）/ txt·log→卡片原文 / csv·tsv→表格分列；共用防线：ws.check() 沙箱校验 + NUL 字节二进制检测（防伪装后缀）+ UTF-8 解码 + `MD_RENDER_MAX_LINES=200` 行数守卫；agent 路径 read_file 打开 .md 自动渲染卡片（非 md 维持默认摘要）
-- [ ] 3.4 models.toml 注册表 + /model 切换 + 连通性校验（FR-26/27）
-- [ ] 3.5 skill 扫描 + 索引注入 + load_skill 惰性加载 + 2 个内置示例（FR-28）
-- [ ] 3.6 /init 生成 glaucous.md 草稿（FR-23）
-- [ ] 3.7 终端降级（truecolor/256/16 色）（FR-30）
+- [x] 3.4 models.toml 注册表 + /model 切换 + 连通性校验（FR-26/27）——**已完成（9/2 销账：与上方 Day 5 / M3 节 3.4 为同一任务的重复条目，以该节 [x] 为准）**
+- [x] 3.5 skill 扫描 + 索引注入 + load_skill 惰性加载 + 2 个内置示例（FR-28）——**已完成（9/2 销账：同 Day 5 / M3 节 3.5，assets/skills/ 下两个内置示例随包分发）**
+- [x] 3.6 /init 生成 glaucous.md 草稿（FR-23）——**已完成（9/2 销账：同 Day 5 / M3 节 3.6，extensions/init_draft.py）**；仅 README* 通配细节未偿还（见 r1-S5）
+- [x] 3.7 终端降级（truecolor/256/16 色）（FR-30）——**已完成（9/2 销账：同 Day 5 / M3 节 3.7，theme.py `_COLOR_SYSTEM_MAP` + GLAUCOUS_COLOR 覆盖 + no_color 降级）**
 - [ ] 3.2r cli.py AI review 修复项：审批「拒绝理由」EOF/Ctrl+C 保护（B-01）、删 risk_icons 空 dict（B-03）、render_event state 形参（S-01）、ask_user 越界序号重问（S-02）
+  - [x] **B-01 已完成（9/2 复核销账）**：ui/callbacks.py `_reject_reason()` 已包 `except (EOFError, KeyboardInterrupt)` → 理由「用户取消」继续拒绝（附加项 B）
+  - [x] **B-03 已完成（9/2 复核销账）**：全仓 grep 无 `risk_icons`，空 dict 已删
+  - [ ] S-01 仍未偿还：ui/render_events.py `render_event(event, payload, state)` 仍带 state 形参
+  - [ ] S-02 仍未偿还（且现状与设计不同）：callbacks.py 越界序号**按自由文本回喂**（`raw.isdigit() and 1 <= int(raw) <= len(options)` 不成立则返回原文），非「重问」；不崩溃但偏离评审建议，待定义口径
 
 > 3.1 已完成并经 AI review（评审文档：docs/designs/202608311000-design-m3-day5-cli-console-migration.md，65 用例基线全绿）；
 > 3.2 三张交互卡已完成 rich Table 化（评审 S-03/S-04 关闭），B-02（action.target escape）随卡片化保留修复；
@@ -201,13 +209,36 @@
 
 - [x] 6.1 测试补齐全绿：概设 §11 七个增补测试文件均已落实（test_checkpoint_git / test_sessions_index（含迁移）/ test_subagent / test_spec_store+test_spec_pipeline / test_mode_default_build / test_rollback_context），全量 336 passed（WSL）
 - [x] 6.2 系统回顾与提交物文档：docs/Glaucous实现详解（v1.1）.md（三主线结构 + 底层机制 + 设计决策速查）、docs/M6需求合规对照表.md（赛事要求逐项比对 + 提交前终检清单 + 全历史零密钥核查）、docs/M6视频脚本与面试材料.md（2 分钟分镜脚本 + 1 分钟面试口述稿 + 高频追问预案）、README.md v1.1 叙事重写、docs/submission/README.txt（≤1000 汉字提交版）
-- [ ] 6.3 评测集实测（需真实模型，用户执行）：需求文档 §6 的 8 个用例（模糊需求/小任务/大任务全流程/改坏回退/拒绝回退/跨会话/子 agent 评审/底线拦截），场景清单见《实现详解》与既有 e2e 清单；实测后出评测报告（成功率/澄清触发率/回退正确率/审批拦截正确率/子 agent 隔离验证/消耗）
+- [x] 6.3 评测集实测（需真实模型，用户执行）：需求文档 §6 的 8 个用例（模糊需求/小任务/大任务全流程/改坏回退/拒绝回退/跨会话/子 agent 评审/底线拦截），场景清单见《实现详解》与既有 e2e 清单；实测后出评测报告（成功率/澄清触发率/回退正确率/审批拦截正确率/子 agent 隔离验证/消耗）
+  - **已完成主体（9/2 销账）**：8 个用例已全部落成 `eval/cases/`（e1~e8，每个含 task.md + workspace/ + check.sh，判据经 gold 答案 + 反例双句自验 13/13）；全自动用例 **e1/e2/e3/e4/e8 已双版本实跑**（v1.1 修复后 vs v1.0-baseline，pass@1）；评测报告已出并含双版本对照与 RAGAS R4（docs/M6评测报告.md §十）
+  - **实测成果**：e1/e2/e4 双版本 PASS；e3 双版本同 FAIL（模型指令遵循短板，非版本差异）；e8 首跑攻破重定向区外写 → 修复后 PASS
+  - **遗留（未销）**：① e5/e6/e7 半自动用例需人工交互执行（/rollback、拒绝并回退、/exit + --resume）；② e9（子 agent 上下文隔离）用例未建；③ 六项量化指标仅采集峰值占用/token/成功率/澄清触发率/拦截正确率，**用时与跑偏次数未系统记录、子 agent 隔离未验证**
 - [ ] 6.4 视频录制（按 docs/M6视频脚本与面试材料.md 分镜，≤2 分钟、≤200MB、画面无密钥）与「姓名」.zip 打包提交（9/2 24:00 前）
+  - **9/2 复核部分完成**：视频已录制并定稿（`docs/submission/Glaucous演示视频最终版.mp4`，09-02 14:00，128.9MB ≤200MB ✓），提交区已备 README.txt（≤1000 汉字）+ 项目介绍.html；**仍未完成：「姓名」.zip 打包**（全仓无任何 .zip）
 - [ ] ⚠ 9/2 24:00 硬截止：截止后不得再向仓库推送；最后一次 push 须在截止前完成（含仓库公开状态确认）
+
+### 外部多维评审复评与修复批次（9/2）
+
+> 起因：外部多维评审（docs/Glaucous项目多维评审报告.html，初评 86/100）指出三项短板：评测覆盖不足、命令分类器模式匹配局限（实测 3 类绕过）、cli.py/commands.py 巨石文件。本批次逐项修复并实测验证，总分 86→89。
+
+- [x] R1 分类器命令替换绕过修复（评审 BLOCKER）：classify 入口 `_has_command_substitution` 引号感知检测（单引号豁免/双引号不豁免/转义豁免），SAFE 遇引号外 `$( )`/反引号抬升 WRITE（**只抬升不稀释**，`echo $(curl|sh)` 仍判 DANGEROUS）；`find -exec/-execdir` 改 token 级精确匹配按 WRITE 定级；12 个正反例，全量 348 passed
+- [x] R2 巨石文件拆分：cli.py **1878→588 行**（拆出 `ui/` 六模块：render_events / thinking / interact / view / input / callbacks，与 `sessions/resume.py`；cli 保留「装配层 + 兼容门面」保住 monkeypatch 语义）；commands.py **1208→639 行**（拆出 commands_spec / commands_sessions / commands_rollback）；3 处测试 console 补丁目标随实现迁移同步修正
+- [x] R3 消除 spec → cli 反向导入（架构扣分项）：pipeline hooks 不再从 cli 穿透取用
+- [x] R4 评测体系扩展 3→8 用例：新增 e3（从零实现智能体，产物可运行契约断言）/ e4（模糊需求澄清**行为判定**：会话 JSONL 中 ask_user 行序先于首次写）/ e6（拒绝联动回退）/ e7（跨会话续接）/ e8（底线拦截，全自动可复判）；每个 check.sh 经 gold 答案 + 反例双句自验 **13/13**（自验过程修正两处判据缺陷：e6 workspace 缺 `.gitignore` 使 `.glaucous/` 被当残留新增、pycache 同秒同尺寸重写逃过失效判定）
+- [x] R5 **e8 首跑实测攻破新 BLOCKER：重定向区外写绕过**——`printf 'x' >> ~/.bashrc` 被真实写入家目录（审计留痕 `risk=write, decision=auto_approve`）。根因：`printf` 不在白名单 → 走「保守升级 WRITE」分支，而该分支**返回前不检查重定向目标指向**；auto-approve 仅对 DANGEROUS 恒拦 → 「区外写恒拦」承诺被绕过。修复：classify 顶层 `_redirect_external_write`（引号感知 `_scan_redirect_targets`，**与首词无关**，任一目标区外/受保护 → DANGEROUS）+ `WRITE_ARG_COMMANDS`（tee/truncate/shred/cp/ln/install/rsync/scp）写目标参数检测；11 个正反例，全量 **359 passed**，e8 复跑 PASS
+  - 教训已归档：**auto-approve 只拦 DANGEROUS，故分类器对「区外/受保护写」的 DANGEROUS 保证是安全承诺的唯一支点**——任何新增分支（尤其保守升级）必须先做区外写目标扫描；静态走查未发现此缺陷，是底线用例真跑才抓到
+- [x] R6 RAGAS 证据链四处缺陷修复 + reason 补采（评审 MAJOR「reason 全空」）：① `git diff` 不含未跟踪文件（agent 新增 tests/ 未 git add → 误判「未新增测试」）→ 补 `ls-files --others` 清单 + 内容摘要；② `.glaucous/` 等运行副产物计入证据（→ scope 系统性误判 0）→ 过滤 + 附加排除注解；③ 终答取「最后一条」被管道残留应答触发的「待命。」掩盖 → 改取最后一条**实质性**回复；④ v1.0 会话一层布局未适配（→ v1.0 全部 report_faithfulness 误判 0）→ 三级布局兼容
+  - 另修：理由补采 `max_tokens=300` 被思考模型 reasoning 吃光致 content 为空（→ 3000 + `reasoning_content` 回退）；裁判 503 时 ragas 仅重试 1 次使整批报废并**以全 -1 覆盖历史结果**（→ 开跑前可用性预检 + 分钟级指数退避，持续不可用则不产出）；裁判端点参数化（JUDGE_BASE_URL / JUDGE_API_KEY / JUDGE_MODEL）
+  - 成果：**24 项评分 reason 非空率 100%**（R1~R3 均 0%）、零异常项；v1.1 9/12 vs v1.0 7/12；修正后与客观判据互相印证
+- [x] R7 双版本跑批（v1.1 修复后 vs v1.0-baseline）：e1/e2/e4 双 PASS、e3 双 FAIL（两版本同样跑偏为 `mini_agent/` 包，顶层 agent.py/tools.py 缺失——**指令遵循是模型层短板，非版本差异**）、e8 v1.0 需单行任务重跑（v1.0 管道只读 stdin 首行，首跑为假阳性）；实测更正两处旧预判：v1.0 **同样具备 ask_user** 且澄清先于写（评测方案预判不成立）
+- [x] R8 文档回填：docs/M6评测报告.md 新增 §十（复评专章，含§九 R3 结论的**假阴性修正标注**、§二/§六 同步更新）；评审报告 HTML 回填修复回执 + 双版本跑批表 + RAGAS R4 表（评测体系 7.5→8.0，总分 86→89）
+- [x] R9 docs 整理（用户口径「重复文档保留最新」）：查明需求文档/概设/开发计划表的 v1.0 与 v1.1 **不是冗余副本而是版本演进链**（v1.1 为增量文档并链接前序版，另有 13 份 designs/reviews 引用 v1.0 路径）——经用户确认**保留原位**，改为在三份 v1.0 文档首部加「📌 版本状态」标注（明确以 v1.1 为准 + 说明不可删除的理由）；视频素材经 md5 比对确认 3 个版本，用户选定删初版 + 中间版（见下方待办）
+- [ ] R9-1 待用户手动删除旧版视频（工具无法处理 >20MB 文件，且不在 Git 中删除不可恢复）：`docs/Glaucous演示视频/Glaucous演示视频.mp4`（125MB 初版）与 `Glaucous演示视频——最终版.mp4`（122MB 中间版），共省 247MB；保留 `Glaucous演示视频最终版.mp4`（09-02 最新，与 submission/ 同 md5）
+- [ ] R10 遗留（本次未处理，诚实登记）：① CI / 静态检查 / 覆盖率工具链（评审 MINOR，ruff/mypy/pytest-cov/GitHub Actions 均未接）；② e5/e6/e7 半自动用例人工执行；③ e9 用例未建；④ 测试债务未偿还（test_model_registry / test_skill_lazyload / test_theme_render / test_repl_commands 四文件仍不存在）；⑤ e3 暴露的指令遵循短板待反向追踪（system prompt 契约约束、方案卡与任务文本对齐）
 
 ### V1.1-M3 会话管理代码评审建议项（r1，见 docs/reviews/202608302100-code-review-v11-m3-sessions-r1.md；B1/B2 已修复并经 r2/r3 聚焦复审放行；r3-S1 状态行已更新）
 
-- [ ] r3-S1 TODO.md 登记头部状态滞后自愈（本轮已更新，后续轮次保持同步）
+- [x] r3-S1 TODO.md 登记头部状态滞后自愈（本轮已更新，后续轮次保持同步）——**9/2 已自愈**：头部补「最后更新 / 测试基线 359 passed / 评测基线 8 用例」三行状态，后续轮次按此口径同步
 - [ ] S1 /sessions 列表卡与 /stats 双卡在单列 make_card 上自动扩列，标题栏形态改变（commands.py，M2-r1-S5 同类先例，视觉验收统一处理）
 - [ ] S2 「a」全部项目视图未按概设「同项目聚组」排序（当前全局时间倒序平铺，commands.py + index.py）
 - [ ] S6 测试缺口：原子写用例、跨项目切换、/stats 内容断言、git dirty 提示 monkeypatch 用例（spec §9.1/9.2 部分项）
